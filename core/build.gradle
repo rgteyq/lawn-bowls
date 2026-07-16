@@ -1,0 +1,24 @@
+[compileJava, compileTestJava]*.options*.encoding = 'UTF-8'
+eclipse.project.name = appName + '-core'
+
+dependencies {
+  api "com.badlogicgames.gdx:gdx-freetype:$gdxVersion"
+  api "com.badlogicgames.gdx:gdx:$gdxVersion"
+  api "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
+
+  if(enableGraalNative == 'true') {
+    implementation "io.github.berstanio:gdx-svmhelper-annotations:$graalHelperVersion"
+  }
+
+  testImplementation "org.jetbrains.kotlin:kotlin-test:$kotlinVersion"
+  testImplementation "org.junit.jupiter:junit-jupiter:5.10.2"
+  testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+jar {
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+test {
+  useJUnitPlatform()
+}
