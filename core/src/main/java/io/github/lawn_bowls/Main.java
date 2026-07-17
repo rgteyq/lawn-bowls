@@ -17,8 +17,10 @@ import com.badlogic.gdx.graphics.g3d.Model;
 import com.badlogic.gdx.graphics.g3d.ModelBatch;
 import com.badlogic.gdx.graphics.g3d.ModelInstance;
 import com.badlogic.gdx.graphics.g3d.attributes.ColorAttribute;
+import com.badlogic.gdx.graphics.g3d.attributes.IntAttribute;
 import com.badlogic.gdx.graphics.g3d.attributes.TextureAttribute;
-import com.badlogic.gdx.graphics.g3d.environment.DirectionalLight;
+import com.badlogic.gdx.graphics.g3d.environment.DirectionalShadowLight;
+import com.badlogic.gdx.graphics.g3d.utils.DepthShaderProvider;
 import com.badlogic.gdx.graphics.g3d.utils.MeshPartBuilder;
 import com.badlogic.gdx.graphics.g3d.utils.ModelBuilder;
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
@@ -53,6 +55,9 @@ public class Main extends ApplicationAdapter {
     private static final float BOUNDARY_LINE_WIDTH_M = 0.05f;
     private static final float BOUNDARY_LINE_HEIGHT_M = 0.02f;
 
+    private static final float SKY_RADIUS_M = 200f;
+    private static final Color SKY_COLOR = new Color(0.5f, 0.7f, 0.9f, 1f);
+
     private static final float MAT_WIDTH_M = 0.36f;
     private static final float MAT_LENGTH_M = 0.61f;
     private static final float MAT_THICKNESS_M = 0.015f; // a real rubber mat is thin, ~1-1.5cm
@@ -76,9 +81,11 @@ public class Main extends ApplicationAdapter {
 
     private static final float MIN_RELEASE_SPEED = 1.0f;
     private static final float MAX_RELEASE_SPEED = 3.5f;
-    // Dragging all the way from the mat to the far ditch line charges full power.
+    // Slingshot-style pull: dragging this far behind the mat charges full power. Kept short so a
+    // full-power delivery only needs a small, comfortable pull rather than the whole green.
+    private static final float MAX_DRAG_DISTANCE_M = 3.0f;
     private static final float SPEED_PER_METER_OF_DRAG =
-        (MAX_RELEASE_SPEED - MIN_RELEASE_SPEED) / AussieRulesEngine.GREEN_LENGTH;
+        (MAX_RELEASE_SPEED - MIN_RELEASE_SPEED) / MAX_DRAG_DISTANCE_M;
 
     // Follow-cam: while the tracked bowl is moving, the camera closes in on it, but never tracks
     // past halfway up the green — it eases to a stop there instead of following all the way to
@@ -97,6 +104,17 @@ public class Main extends ApplicationAdapter {
     private ModelBatch modelBatch;
     private Environment environment;
 
+    // Shadow pass: only the mat/jack/live bowls cast (see drawShadows()) — the default shadow
+    // shader has no depth-bias term, so large flat casters/receivers (grass, ditch, scenery) show
+    // acne at grazing angles if included as casters.
+    private DirectionalShadowLight shadowLight;
+    private ModelBatch shadowBatch;
+    private final Array<ModelInstance> shadowCasters = new Array<>();
+    // Fixed at rink centre (not the moving follow-cam target) so the shadow frustum doesn't jitter.
+    private final Vector3 shadowCenter = new Vector3(
+        AussieBowlsPhysics.RINK_WIDTH_M / 2f, 0f, -AussieRulesEngine.GREEN_LENGTH / 2f
+    );
+
     // Reusable geometry, built once in create() and disposed in dispose().
     private final Array<Model> ownedModels = new Array<>();
     private final Array<ModelInstance> staticInstances = new Array<>();
@@ -104,6 +122,7 @@ public class Main extends ApplicationAdapter {
     private Model bowlModelPlayer0;
     private Model bowlModelPlayer1;
 
+    private ModelInstance matInstance;
     private ModelInstance jackInstance;
     // Index-aligned with `bowls`: bowlInstances.get(i) renders bowls.get(i).
     private final Array<ModelInstance> bowlInstances = new Array<>();
@@ -117,14 +136,18 @@ public class Main extends ApplicationAdapter {
     private final Vector2 deliveryOrigin = new Vector2(AussieBowlsPhysics.RINK_WIDTH_M / 2f, 1.0f);
     private final Vector2 aimTarget = new Vector2();
     private boolean aiming = false;
+    private float aimAnimTime = 0f;
+    // Eased toward the real drag distance each frame so the arrow visibly grows rather than snapping.
+    private float aimVisualDragDistance = 0f;
 
     private final Plane groundPlane = new Plane(Vector3.Y, 0f);
     private final Vector3 pickResult = new Vector3();
 
-    // Pulled back further than the mat's own position (rinkY=1) so the whole mat clears the
-    // vertical field of view instead of sitting right at its edge and getting clipped.
-    private final Vector3 idleCameraPosition = new Vector3(2.5f, 4.0f, 6.0f);
-    private final Vector3 idleCameraLookAt = new Vector3(2.5f, 0.2f, -20f);
+    // Pulled back and angled down further than the mat's own position (rinkY=1) so the mat sits in
+    // the upper-middle of the view rather than hugging the bottom edge — leaving room below it on
+    // screen for the slingshot-style pull-back drag (see DeliveryInputAdapter/releaseBowl).
+    private final Vector3 idleCameraPosition = new Vector3(2.5f, 4.0f, 9.0f);
+    private final Vector3 idleCameraLookAt = new Vector3(2.5f, 0.2f, -16f);
     private final Vector3 cameraPosition = new Vector3();
     private final Vector3 cameraLookAt = new Vector3();
     private final Vector3 desiredCameraPosition = new Vector3();
@@ -161,7 +184,8 @@ public class Main extends ApplicationAdapter {
     private void setUpCamera() {
         camera = new PerspectiveCamera(65f, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
         camera.near = 0.1f;
-        camera.far = 60f;
+        // Far enough to comfortably contain the sky sphere and surrounding scenery without clipping.
+        camera.far = 250f;
         // Start at the idle view: a little behind and above the mat, looking up the whole green.
         cameraPosition.set(idleCameraPosition);
         cameraLookAt.set(idleCameraLookAt);
@@ -178,7 +202,18 @@ public class Main extends ApplicationAdapter {
     private void setUpEnvironment() {
         environment = new Environment();
         environment.set(new ColorAttribute(ColorAttribute.AmbientLight, 0.55f, 0.55f, 0.55f, 1f));
-        environment.add(new DirectionalLight().set(0.8f, 0.8f, 0.75f, -0.4f, -1f, -0.3f));
+        // 40x40 viewport covers the ~5m x 36m play area with margin for the follow-cam getting
+        // close; near/far kept tight around the actual rink bounds (not camera.far) to preserve
+        // shadow-map depth precision. Both add() and shadowMap= are required — add() alone doesn't
+        // wire up shadow sampling in the default shader.
+        shadowLight = new DirectionalShadowLight(2048, 2048, 40f, 40f, 1f, 60f);
+        // ~51 degree sun elevation: a near-vertical angle leaves shadows almost entirely hidden
+        // under small objects like the jack/bowls, so this is tilted enough to cast a visible,
+        // grounding shadow while still reading as a natural midday sun rather than a sunset.
+        shadowLight.set(0.8f, 0.8f, 0.75f, -0.45f, -0.75f, -0.35f);
+        environment.add(shadowLight);
+        environment.shadowMap = shadowLight;
+        shadowBatch = new ModelBatch(new DepthShaderProvider());
     }
 
     /** Builds the static geometry (grass, ditch, boundary lines, mat) and the reusable entity models. */
@@ -186,6 +221,9 @@ public class Main extends ApplicationAdapter {
         modelBatch = new ModelBatch();
         ModelBuilder builder = new ModelBuilder();
         long attrs = VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal;
+
+        buildSky(builder, attrs);
+        SceneryBuilder.buildGroundAndHedge(builder, attrs, staticInstances, ownedModels);
 
         grassTexture = new Texture(Gdx.files.internal(GRASS_TEXTURE_FILE));
         grassTexture.setWrap(Texture.TextureWrap.Repeat, Texture.TextureWrap.Repeat);
@@ -200,6 +238,12 @@ public class Main extends ApplicationAdapter {
             AussieBowlsPhysics.RINK_WIDTH_M / 2f, -GREEN_THICKNESS_M / 2f, -AussieRulesEngine.GREEN_LENGTH / 2f
         );
         staticInstances.add(grass);
+
+        float adjacentRinkLength = AussieRulesEngine.DITCH_BACK_WALL;
+        float adjacentRinkVRepeat = adjacentRinkLength / GRASS_TILE_SIZE_M;
+        SceneryBuilder.buildSurroundings(
+            builder, attrs, grassTexture, grassURepeat, adjacentRinkVRepeat, staticInstances, ownedModels
+        );
 
         Model ditchModel = box(builder, AussieBowlsPhysics.RINK_WIDTH_M, DITCH_THICKNESS_M, AussieRulesEngine.DITCH_DEPTH, Color.DARK_GRAY, attrs);
         ModelInstance ditch = new ModelInstance(ditchModel);
@@ -232,11 +276,32 @@ public class Main extends ApplicationAdapter {
         jackInstance = new ModelInstance(jackModel);
     }
 
+    /**
+     * A large sphere surrounding the whole scene, lit fullbright (black diffuse + emissive colour)
+     * so it reads as sky regardless of the directional light's angle, with culling disabled so its
+     * inward-facing surface is visible from inside it.
+     */
+    private void buildSky(ModelBuilder builder, long attrs) {
+        Material material = new Material(
+            ColorAttribute.createDiffuse(Color.BLACK),
+            ColorAttribute.createEmissive(SKY_COLOR),
+            IntAttribute.createCullFace(GL20.GL_NONE)
+        );
+        Model skyModel = builder.createSphere(SKY_RADIUS_M * 2f, SKY_RADIUS_M * 2f, SKY_RADIUS_M * 2f, 24, 24, material, attrs);
+        ownedModels.add(skyModel);
+        ModelInstance sky = new ModelInstance(skyModel);
+        sky.transform.setToTranslation(
+            AussieBowlsPhysics.RINK_WIDTH_M / 2f, 0f, -AussieRulesEngine.GREEN_LENGTH / 2f
+        );
+        staticInstances.add(sky);
+    }
+
     private void buildMat(ModelBuilder builder, long attrs) {
         Model matModel = box(builder, MAT_WIDTH_M, MAT_THICKNESS_M, MAT_LENGTH_M, new Color(0.90f, 0.89f, 0.86f, 1f), attrs);
         ModelInstance mat = new ModelInstance(matModel);
         mat.transform.setToTranslation(deliveryOrigin.x, MAT_THICKNESS_M / 2f, -deliveryOrigin.y);
         staticInstances.add(mat);
+        matInstance = mat;
 
         // Two scattered diamond-stud clusters, front and rear of the branding panel.
         Model diamondModel = box(builder, DIAMOND_SIZE_M, DIAMOND_THICKNESS_M, DIAMOND_SIZE_M, new Color(0.10f, 0.35f, 0.14f, 1f), attrs);
@@ -303,6 +368,8 @@ public class Main extends ApplicationAdapter {
 
         ScreenUtils.clear(0.5f, 0.7f, 0.9f, 1f, true);
 
+        drawShadows();
+
         modelBatch.begin(camera);
         modelBatch.render(staticInstances, environment);
         modelBatch.render(jackInstance, environment);
@@ -314,7 +381,14 @@ public class Main extends ApplicationAdapter {
         modelBatch.end();
 
         if (aiming) {
-            drawAimLine();
+            aimAnimTime += delta;
+            float targetDragDistance = new Vector2(aimTarget).sub(deliveryOrigin).len();
+            float growSmoothing = 1f - (float) Math.exp(-8f * delta);
+            aimVisualDragDistance += (targetDragDistance - aimVisualDragDistance) * growSmoothing;
+            drawAimArrow();
+        } else {
+            aimAnimTime = 0f;
+            aimVisualDragDistance = 0f;
         }
 
         batch.begin();
@@ -337,6 +411,29 @@ public class Main extends ApplicationAdapter {
                 radius, radius, radius
             );
         }
+    }
+
+    /**
+     * Renders the mat/jack/live-bowl shadow casters into {@link #shadowLight}'s depth map. Grass,
+     * ditch, boundary lines, and the background scenery are deliberately excluded — the default
+     * shadow shader has no depth-bias term, so large flat casters/receivers show acne at grazing
+     * angles.
+     */
+    private void drawShadows() {
+        shadowCasters.clear();
+        shadowCasters.add(matInstance);
+        shadowCasters.add(jackInstance);
+        for (int i = 0; i < bowls.size; i++) {
+            if (bowls.get(i).isAlive()) {
+                shadowCasters.add(bowlInstances.get(i));
+            }
+        }
+
+        shadowLight.begin(shadowCenter, shadowLight.direction);
+        shadowBatch.begin(shadowLight.getCamera());
+        shadowBatch.render(shadowCasters);
+        shadowBatch.end();
+        shadowLight.end();
     }
 
     /**
@@ -364,15 +461,70 @@ public class Main extends ApplicationAdapter {
         applyCamera();
     }
 
-    /** A live 3D line from the mat to the current aim point, drawn over the 3D scene. */
-    private void drawAimLine() {
+    /**
+     * A live 3D slingshot band from the mat back to the current drag point, drawn over the 3D
+     * scene — it follows the actual drag (behind the mat), not the bowl's eventual travel
+     * direction, which is the opposite way (see {@link #releaseBowl()}). Its length eases toward
+     * the actual drag distance each frame (see {@link #aimVisualDragDistance}) so it visibly grows
+     * as the player pulls back further, and both its thickness and colour scale with the resulting
+     * release power ({@link #SPEED_PER_METER_OF_DRAG}). A small power-scaled pulse keeps it
+     * animated while held, and a round grip handle marks the drag point.
+     */
+    private void drawAimArrow() {
+        float visualLength = aimVisualDragDistance;
+        if (visualLength < 0.02f) {
+            return;
+        }
+
+        Vector2 pull = new Vector2(aimTarget).sub(deliveryOrigin);
+        if (pull.isZero(0.0001f)) {
+            return;
+        }
+        Vector2 dir = new Vector2(pull).nor();
+        Vector2 perp = new Vector2(-dir.y, dir.x);
+
+        float powerFraction = MathUtils.clamp(
+            visualLength * SPEED_PER_METER_OF_DRAG / (MAX_RELEASE_SPEED - MIN_RELEASE_SPEED), 0f, 1f
+        );
+
+        float bandWidth = MathUtils.lerp(0.04f, 0.14f, powerFraction);
+        float gripRadius = MathUtils.lerp(0.08f, 0.18f, powerFraction);
+
+        // Subtle pulse so the band reads as "alive" while charging, stronger the more power is loaded.
+        float pulse = 1f + 0.08f * powerFraction * MathUtils.sin(aimAnimTime * 6f);
+        bandWidth *= pulse;
+        gripRadius *= pulse;
+
+        Vector2 tip = new Vector2(deliveryOrigin).mulAdd(dir, visualLength);
+        // Starts a modest gold at a light pull and brightens toward a shimmering near-white yellow
+        // the further back it's pulled, so more power visibly stands out more.
+        float glimmer = 0.5f + 0.5f * MathUtils.sin(aimAnimTime * 8f);
+        float brighten = powerFraction * MathUtils.lerp(0.6f, 1f, glimmer);
+        Color color = new Color(1f, MathUtils.lerp(0.7f, 1f, brighten), MathUtils.lerp(0f, 0.7f, brighten), 1f);
+
+        // ShapeRenderer's filled triangle() has no 3D (x,y,z) overload, only line() does, so the
+        // "filled" band/handle are faked with bundles of 3D line strokes.
         shapeRenderer.setProjectionMatrix(camera.combined);
         shapeRenderer.begin(ShapeRenderer.ShapeType.Line);
-        shapeRenderer.setColor(Color.YELLOW);
-        shapeRenderer.line(
-            deliveryOrigin.x, 0.05f, -deliveryOrigin.y,
-            aimTarget.x, 0.05f, -aimTarget.y
-        );
+        shapeRenderer.setColor(color);
+
+        int bandStrokes = 5;
+        for (int i = 0; i < bandStrokes; i++) {
+            float t = MathUtils.lerp(-0.5f, 0.5f, (float) i / (bandStrokes - 1));
+            Vector2 from = new Vector2(deliveryOrigin).mulAdd(perp, bandWidth * t);
+            Vector2 to = new Vector2(tip).mulAdd(perp, bandWidth * t);
+            shapeRenderer.line(from.x, 0.05f, -from.y, to.x, 0.05f, -to.y);
+        }
+
+        // Grip handle: a radial fan of strokes reads as a small filled disc at the drag point.
+        int gripSpokes = 12;
+        for (int i = 0; i < gripSpokes; i++) {
+            float angle = MathUtils.PI2 * i / gripSpokes;
+            float edgeX = tip.x + MathUtils.cos(angle) * gripRadius;
+            float edgeY = tip.y + MathUtils.sin(angle) * gripRadius;
+            shapeRenderer.line(tip.x, 0.05f, -tip.y, edgeX, 0.05f, -edgeY);
+        }
+
         shapeRenderer.end();
     }
 
@@ -403,29 +555,33 @@ public class Main extends ApplicationAdapter {
         }
     }
 
-    /** Converts an aim point (drag distance/direction from the mat) into a released bowl. */
+    /** Converts a slingshot-style pull (drag distance/direction behind the mat) into a released bowl. */
     private void releaseBowl() {
         if (!end.canDeliver(bowls)) {
             return; // end is finished, or a previous bowl hasn't come to rest yet
         }
 
-        Vector2 offset = new Vector2(aimTarget).sub(deliveryOrigin);
-        float dragDistance = offset.len();
+        Vector2 pull = new Vector2(aimTarget).sub(deliveryOrigin);
+        float dragDistance = pull.len();
         if (dragDistance < 0.1f) {
             return; // ignore accidental clicks/taps
         }
 
-        // Derived from which side of the mat's centre line the aim point falls on: dragging right
-        // is a backhand delivery (bias continues curving left), dragging left is forehand (bias
-        // continues curving right) — no manual hand toggle needed.
-        boolean isBackhand = offset.x > 0f;
+        // Slingshot-style: the bowl travels opposite the pull, e.g. dragging behind-and-right of
+        // the mat launches it to the left.
+        Vector2 travelDir = new Vector2(pull).scl(-1f).nor();
+
+        // Derived from which side of the mat's centre line the travel direction falls on: heading
+        // right is a backhand delivery (bias continues curving left), heading left is forehand
+        // (bias continues curving right) — no manual hand toggle needed.
+        boolean isBackhand = travelDir.x > 0f;
 
         float speed = MathUtils.clamp(
             MIN_RELEASE_SPEED + dragDistance * SPEED_PER_METER_OF_DRAG,
             MIN_RELEASE_SPEED,
             MAX_RELEASE_SPEED
         );
-        Vector2 velocity = offset.nor().scl(speed);
+        Vector2 velocity = travelDir.scl(speed);
 
         Bowl bowl = new Bowl(
             new Vector2(deliveryOrigin),
@@ -463,6 +619,8 @@ public class Main extends ApplicationAdapter {
         font.dispose();
         shapeRenderer.dispose();
         modelBatch.dispose();
+        shadowBatch.dispose();
+        shadowLight.dispose();
         grassTexture.dispose();
         for (Model model : ownedModels) {
             model.dispose();
@@ -470,9 +628,10 @@ public class Main extends ApplicationAdapter {
     }
 
     /**
-     * Click-drag-release to aim and set weight: drag distance from the mat maps to release speed
-     * ({@link #SPEED_PER_METER_OF_DRAG}), drag direction becomes the bowl's heading, and which side
-     * of the mat the aim point falls on determines forehand vs backhand (see {@link #releaseBowl}).
+     * Click-drag-release to aim and set weight, slingshot-style: drag distance behind the mat maps
+     * to release speed ({@link #SPEED_PER_METER_OF_DRAG}), and the bowl's heading is the opposite
+     * of the drag direction (e.g. dragging right of the mat launches left) — see
+     * {@link #releaseBowl}.
      */
     private class DeliveryInputAdapter extends InputAdapter {
         @Override

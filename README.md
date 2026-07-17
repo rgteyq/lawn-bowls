@@ -31,11 +31,13 @@ rather than the earlier 2D `ShapeRenderer`/`OrthographicCamera` top-down debug v
 meters, matching `Bowl`/`Jack` positions directly — no pixels-per-meter scale is needed. Rink X (width,
 `0..5`) maps straight to world X; rink Y (length, `0..~35.3`) maps to world Z as `-rinkY`, so the green
 recedes into the screen along the camera's default forward (`-Z`) direction; world Y is height above
-the green surface (`0`). `setUpCamera()` starts the `PerspectiveCamera` (65° FOV) at the idle view —
-behind and above the mat (`idleCameraPosition = (2.5, 4.0, 6.0)`), looking up the length of the green
-(`idleCameraLookAt = (2.5, 0.2, -20)`) — a broadcast-style angle rather than looking straight down.
-The camera sits noticeably further back than the mat itself (rink Y `1.0`) — with less clearance the
-mat sat right at the edge of the vertical field of view and got clipped.
+the green surface (`0`). `setUpCamera()` starts the `PerspectiveCamera` (65° FOV, `far = 250` to fit
+the sky sphere and surrounding scenery — see **Scenery** below) at the idle view — behind and above the
+mat (`idleCameraPosition = (2.5, 4.0, 9.0)`), looking up the length of the green
+(`idleCameraLookAt = (2.5, 0.2, -16)`) — a broadcast-style angle rather than looking straight down. The
+camera sits noticeably further back than the mat itself (rink Y `1.0`), pushing the mat up into the
+upper-middle of the frame rather than the bottom edge — this leaves visible screen space *behind* the
+mat for the slingshot-style pull-back drag (see **Aiming and delivery** below).
 
 **Follow camera**: `updateCamera(delta)` (called every frame from `render()`, after physics/transforms
 update) is a simple two-state camera — idle vs. tracking a released bowl — blended with exponential
@@ -63,13 +65,12 @@ color, reused across every bowl that player delivers — rather than rebuilt per
   `texturedBox()` — a `MeshPartBuilder` helper that sets a UV range beyond `[0,1]`
   (`setUVRange(0, 0, uRepeat, vRepeat)`) with the `Texture`'s wrap mode set to `Repeat`, so the image
   tiles every `GRASS_TILE_SIZE_M` (~2m) across the rink instead of stretching. There's no procedural
-  stripe geometry anymore — the texture supplies the look directly. `assets/bowling-green-tile.jpeg`
-  and `assets/bowling-green-grass-background.jpg` (earlier candidates) are unused now but still in
-  the repo if you want to remove them. One asset gotcha hit along the way: the first candidate file
-  was actually a WebP image saved with a `.jpg` extension — libGDX's loader can't decode WebP, so it
-  had to be re-encoded as a real JPEG before it would load (`file <path>` / `sips -g format` are the
-  quick ways to catch this if a future asset
-  swap silently fails the same way).
+  stripe geometry anymore — the texture supplies the look directly. Two earlier candidate textures
+  (`bowling-green-tile.jpeg`, `bowling-green-grass-background.jpg`) were tried and removed from
+  `assets/` — lower quality than the one in use. One asset gotcha hit along the way: the first
+  candidate file was actually a WebP image saved with a `.jpg` extension — libGDX's loader can't
+  decode WebP, so it had to be re-encoded as a real JPEG before it would load (`file <path>` /
+  `sips -g format` are the quick ways to catch this if a future asset swap silently fails the same way).
 - **Ditch**: a dark box recessed `DITCH_RECESS_M` (15cm) below the green surface — a real sunken
   ditch, not just a differently-colored strip.
 - **Boundary lines**: thin white boxes along both long edges of the rink, standing in for the
@@ -87,20 +88,34 @@ color, reused across every bowl that player delivers — rather than rebuilt per
   `updateInstanceTransforms()`. `Main` keeps a `bowlInstances` array index-aligned with `bowls` — a
   new `ModelInstance` is appended in `releaseBowl()` alongside each new `Bowl`.
 
-Bowls are still player-driven, not seeded: click-drag-release from the mat to deliver one.
-`DeliveryInputAdapter` tracks the drag as `aiming`/`aimTarget`; `setAimTargetFromScreen()` now works by
-casting a pick ray from the `PerspectiveCamera` (`camera.getPickRay`) and intersecting it with the
-ground plane (`Intersector.intersectRayPlane`) instead of a flat pixel-to-meter affine transform — the
-aim line itself is still drawn with `ShapeRenderer`, just fed the 3D camera's projection matrix and 3D
-line coordinates. On release, `releaseBowl()` turns the drag into a new `Bowl`:
+Bowls are still player-driven, not seeded: click-drag-release from the mat to deliver one, slingshot
+style — drag *behind* the mat (toward the camera) rather than toward the target; the bowl travels the
+opposite way. `DeliveryInputAdapter` tracks the drag as `aiming`/`aimTarget`; `setAimTargetFromScreen()`
+works by casting a pick ray from the `PerspectiveCamera` (`camera.getPickRay`) and intersecting it with
+the ground plane (`Intersector.intersectRayPlane`) instead of a flat pixel-to-meter affine transform.
 
-- **Direction** is the normalized vector from the mat to the release point.
-- **Speed** scales with drag distance — `MIN_RELEASE_SPEED` at the mat up to `MAX_RELEASE_SPEED` at a
-  full drag to the far ditch line (`SPEED_PER_METER_OF_DRAG = (MAX - MIN) / AussieRulesEngine.GREEN_LENGTH`).
-- **Delivery hand** is derived, not chosen: `isBackhand = offset.x > 0f` — dragging right of the
-  mat's centre line is backhand (bias curves left), dragging left is forehand (bias curves right).
-  No key press needed. This matches the real technique of aiming wide on the side opposite your
-  intended curve, so the bias arcs the bowl back in toward the jack rather than further away from it.
+While aiming, `drawAimArrow()` draws a pull band from the mat back to the live drag point (not a
+forward-pointing arrow — an arrowhead pointing opposite the bowl's actual travel direction read as
+confusing) via `ShapeRenderer`, fed the 3D camera's projection matrix and 3D line coordinates.
+`ShapeRenderer`'s filled `triangle()` has no 3D (x,y,z) overload, only `line()` does, so the "filled"
+band and its round grip handle at the drag point are faked with bundles of 3D line strokes rather than
+real triangles. The band's width, its grip handle's radius, and its color (a modest gold brightening to
+a shimmering near-white yellow) all scale with the resulting release power, and `aimVisualDragDistance`
+eases toward the real drag distance each frame (framerate-independent lerp, same pattern as the follow
+camera) so the band visibly grows rather than snapping to length.
+
+On release, `releaseBowl()` turns the drag into a new `Bowl`:
+
+- **Direction** is the normalized vector from the release point back to the mat — the *opposite* of
+  the drag vector (`pull`), matching the slingshot visual.
+- **Speed** scales with drag distance — `MIN_RELEASE_SPEED` at no drag up to `MAX_RELEASE_SPEED` at
+  `MAX_DRAG_DISTANCE_M` (3m; a short, comfortable pull rather than needing to drag the whole green's
+  length).
+- **Delivery hand** is derived, not chosen, from the *travel* direction (not the raw drag):
+  `isBackhand = travelDir.x > 0f` — the bowl heading right is backhand (bias curves left), heading left
+  is forehand (bias curves right). No key press needed. This matches the real technique of aiming wide
+  on the side opposite your intended curve, so the bias arcs the bowl back in toward the jack rather
+  than further away from it.
 - **Owner** is the currently-up player from `End`; bowls render maroon for player 1, navy for player 2.
 
 The drawn radius (`BOWL_VISUAL_RADIUS_SCALE`) is still exaggerated over the true physical scale for
@@ -112,6 +127,51 @@ differentiation — a follow-up if it's still needed.
 A top-left HUD (drawn with a `BitmapFont` at `0.8` scale via a 2D `SpriteBatch` pass after the 3D
 scene, split across a few short lines to fit the narrow window) shows whose turn it is, how many bowls
 each player has left, and `"End complete!"` once both have delivered their full allocation.
+
+## Scenery
+
+`io.github.lawn_bowls.SceneryBuilder` (in `core`, Java, package-private) builds everything *outside*
+the playable rink — ground, hedge, adjacent rinks, a clubhouse, a spectator area, and trees — so
+`Main.buildScene()` stays focused on gameplay geometry. It's flat-colored/procedural throughout (no
+new photographic textures, aside from reusing the rink's own grass texture on the two adjacent rink
+strips), matching the existing mat/boundary style. It mirrors small pieces of `Main`'s own `box()` /
+`texturedBox()` / `sphere()` helpers as private static methods rather than sharing a utility class —
+consistent with `Main`'s own ad hoc, per-shape helper style rather than a premature abstraction.
+
+- **`buildGroundAndHedge()`**: a large (`200m²`) flat ground plane, positioned just below the grass
+  box so the rink doesn't float against open sky, plus a hedge perimeter (two long boxes) set back far
+  enough from the rink centreline to clear the adjacent rinks below.
+- **`buildSurroundings()`**: two adjacent rink strips flanking the playable one (reusing `Main`'s grass
+  `Texture` and tiling, not a new texture), a simple clubhouse (wall box + roof box) beyond the ditch,
+  a few spectator benches in front of it, and a handful of trunk-plus-foliage-sphere tree impostors
+  scattered around the clubhouse/hedge perimeter.
+
+`Main.buildSky()` adds a large sphere (`SKY_RADIUS_M` = 200) surrounding the whole scene — `camera.far`
+is `250` to comfortably contain it. It's lit fullbright regardless of the directional light's angle via
+a black diffuse + emissive-color material (`gl_FragColor = diffuse * lighting + emissive`, so a black
+diffuse zeroes out the lighting term and only the emissive color shows), with culling disabled
+(`IntAttribute.createCullFace(GL20.GL_NONE)`) so its inward-facing surface renders from inside it —
+without that, the sphere's front faces (visible from outside) would be back-face-culled from the
+camera's position inside the sphere, and nothing would draw.
+
+**Shadows**: bowls, jack, and the mat cast shadows onto the grass via a `DirectionalShadowLight`
+(`environment.add(shadowLight)` *and* `environment.shadowMap = shadowLight` are both required — the
+first adds it as a light source, the second is what the default shader actually checks to enable
+shadow sampling). Grass, ditch, boundary lines, and all of `SceneryBuilder`'s geometry are deliberately
+excluded from the shadow-casting `shadowCasters` array — the default shadow shader has no depth-bias
+term, so large flat casters/receivers show acne at grazing angles. The shadow camera is re-centred each
+frame on a fixed rink-centre point (not the moving follow-cam target), so the shadow frustum doesn't
+jitter as the camera tracks a rolling bowl. The light's direction (`(-0.45, -0.75, -0.35)`, ~51° sun
+elevation) is deliberately tilted well off vertical — a near-vertical light leaves shadows almost
+entirely hidden under small objects like the jack, since the offset from directly beneath is what
+makes a shadow visible at all.
+
+One implementation pitfall worth knowing if this code gets touched again: `ModelBatch.render(...)`
+only *queues* renderables — the actual GPU draw call happens in `flush()`, called from `end()`. Reading
+the shadow map's framebuffer back (e.g. via `glReadPixels`, while debugging) before calling
+`shadowBatch.end()` will show only whatever was already there (the FBO's own clear color), not what was
+just rendered — this cost significant debugging time before the fix was traced to read-ordering, not
+the shadow math itself.
 
 ## Turns
 
