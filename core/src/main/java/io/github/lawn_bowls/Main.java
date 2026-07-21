@@ -33,6 +33,8 @@ import com.badlogic.gdx.math.Vector3;
 import com.badlogic.gdx.math.collision.Ray;
 import com.badlogic.gdx.utils.Array;
 import com.badlogic.gdx.utils.ScreenUtils;
+import io.github.lawn_bowls.ai.BowlAi;
+import io.github.lawn_bowls.ai.DeliveryPlan;
 import io.github.lawn_bowls.game.End;
 import io.github.lawn_bowls.game.EndResult;
 import io.github.lawn_bowls.game.Match;
@@ -58,12 +60,16 @@ public class Main extends ApplicationAdapter {
     // plane that must clear all of them) match the playable rink's own exactly.
     static final float DITCH_RECESS_M = 0.15f; // ditch floor sits below the green surface
     static final float DITCH_THICKNESS_M = 0.10f;
-    // Dark synthetic ditch lining (rubber/carpet, as on a real green) rather than visible sand — a
-    // flat tan patch didn't read as a recess under simple lighting, whereas a dark, low-reflectance
-    // material contrasts hard against the bright grass and immediately reads as a trough. The wall is
-    // deliberately darker than the floor (as if in its own shadow) for an added depth cue.
+    // Dark synthetic ditch lining (rubber/carpet, as on a real green) for the floor — not visible
+    // sand, a flat tan patch didn't read as a recess under simple lighting, whereas a dark,
+    // low-reflectance material contrasts hard against the bright grass and immediately reads as a
+    // trough. The wall, though, is a grassed bank in reality (reference: assets/back_ditch.jpeg —
+    // the green turf runs right up to and down into the ditch, no dark seam) — an earlier near-black
+    // wall color read as an artificial trench rather than a turfed drop, so it's a grass tone instead,
+    // a shade darker than the flat green surface as if in its own shadow (a real depth cue, not just
+    // a color match).
     static final Color DITCH_FLOOR_COLOR = new Color(0.16f, 0.16f, 0.18f, 1f);
-    static final Color DITCH_WALL_COLOR = new Color(0.07f, 0.07f, 0.08f, 1f);
+    static final Color DITCH_WALL_COLOR = new Color(0.18f, 0.38f, 0.14f, 1f);
     // A thin bank wall closing the vertical gap between the green surface and the recessed ditch
     // floor right below it — without this, that gap is open space, showing whatever's behind it
     // (ground/sky) rather than reading as a connected ditch.
@@ -78,8 +84,22 @@ public class Main extends ApplicationAdapter {
     private static final float POLE_HEIGHT_M = 2.0f;
     private static final float POLE_DIAMETER_M = 0.08f;
 
+    // Short alternating white/blue ditch markers along the rear ditch's inner edge (reference:
+    // assets/back_ditch.jpeg, labeled "Ditch Markers" there) — a distinct real feature from the
+    // tall corner poles above: low pegs spaced across the ditch rather than tall posts at its corners.
+    private static final float DITCH_MARKER_HEIGHT_M = 0.3f;
+    private static final float DITCH_MARKER_DIAMETER_M = 0.03f;
+    private static final int DITCH_MARKER_COUNT = 5;
+    private static final Color DITCH_MARKER_BLUE = new Color(0.15f, 0.25f, 0.55f, 1f);
+
     private static final float SKY_RADIUS_M = 200f;
-    private static final Color SKY_COLOR = new Color(0.5f, 0.7f, 0.9f, 1f);
+    private static final String CLOUDS_TEXTURE_FILE = "clouds.jpeg";
+    // Repeated rather than stretched once across the whole sphere — a single copy of a small photo
+    // spread over a 200m sphere would be a blurry smear; tiling several times reads as a believable
+    // cloud pattern instead. Not seamless at the tile edges, but the source photo's soft, irregular
+    // clouds hide the repeat far better than a sharp/geometric texture would.
+    private static final float SKY_CLOUD_U_REPEAT = 6f;
+    private static final float SKY_CLOUD_V_REPEAT = 3f;
 
     private static final float MAT_WIDTH_M = 0.36f;
     private static final float MAT_LENGTH_M = 0.61f;
@@ -97,10 +117,11 @@ public class Main extends ApplicationAdapter {
     };
 
     // Bowls/jack are only 13cm/6.3cm across on a 5m-wide rink; exaggerate the drawn radius for
-    // visibility. Collision/physics still use the real Bowl.radius/Jack.radius. The jack gets its
-    // own, larger scale — at true-to-scale proportions it's the hardest thing on the green to spot.
-    private static final float BOWL_VISUAL_RADIUS_SCALE = 1.6f;
-    private static final float JACK_VISUAL_RADIUS_SCALE = 4.0f;
+    // visibility. Collision/physics still use the real Bowl.radius/Jack.radius. Both use the same
+    // scale (the jack previously got its own larger one) so the jack still reads as smaller than a
+    // bowl on screen, matching its real ~63mm vs ~130mm proportions — a bigger jack-only scale made
+    // it look larger than the bowls, which is backwards.
+    private static final float VISUAL_RADIUS_SCALE = 1.6f;
 
     private static final float MIN_RELEASE_SPEED = 1.0f;
     private static final float MAX_RELEASE_SPEED = 3.5f;
@@ -129,12 +150,20 @@ public class Main extends ApplicationAdapter {
     // end's bowls/jack are auto-reset — long enough to read the final head.
     private static final float END_TRANSITION_DELAY_S = 2.5f;
 
+    // Player 2 (navy) is always the computer opponent — see BowlAi. A brief pause before it
+    // delivers (AI_THINK_DELAY_S) so it doesn't fire the instant it's up; purely for pacing/feel,
+    // not a technical requirement.
+    private static final int AI_PLAYER = 1;
+    private static final float AI_THINK_DELAY_S = 1.0f;
+    private static final float AI_DIFFICULTY = 0.35f; // 0 = perfect, 1 = heavy jitter
+
     private SpriteBatch batch;
     private BitmapFont font;
     private BitmapFont scoreFont;
     private GlyphLayout layout;
     private ShapeRenderer shapeRenderer;
     private Texture grassTexture;
+    private Texture cloudsTexture;
 
     private PerspectiveCamera camera;
     private ModelBatch modelBatch;
@@ -165,10 +194,15 @@ public class Main extends ApplicationAdapter {
 
     private AussieRulesEngine rulesEngine;
     private AussieBowlsPhysics bowlsPhysics;
+    private BowlAi bowlAi;
     private End end;
     private Match match;
     private Jack jack;
     private Array<Bowl> bowls;
+
+    // Counts up while it's AI_PLAYER's turn and the green has settled; once it passes
+    // AI_THINK_DELAY_S the AI actually delivers (see updateAiTurn()).
+    private float aiThinkTimer;
 
     // End-to-end lifecycle: set once the just-completed end has been scored, cleared again once
     // the next end's bowls/jack are reset. lastEndMessage/endTransitionTimer drive the on-screen
@@ -190,9 +224,11 @@ public class Main extends ApplicationAdapter {
 
     // Pulled back and angled down further than the mat's own position (rinkY=1) so the mat sits in
     // the upper-middle of the view rather than hugging the bottom edge — leaving room below it on
-    // screen for the slingshot-style pull-back drag (see DeliveryInputAdapter/releaseBowl).
-    private final Vector3 idleCameraPosition = new Vector3(2.5f, 4.0f, 9.0f);
-    private final Vector3 idleCameraLookAt = new Vector3(2.5f, 0.2f, -16f);
+    // screen for the slingshot-style pull-back drag (see DeliveryInputAdapter/releaseBowl). Closer
+    // and shallower than the very first idle framing, which left a large dead patch of empty grass
+    // below the mat with nothing happening in it.
+    private final Vector3 idleCameraPosition = new Vector3(2.5f, 3.5f, 7.5f);
+    private final Vector3 idleCameraLookAt = new Vector3(2.5f, 0.45f, -14f);
     private final Vector3 cameraPosition = new Vector3();
     private final Vector3 cameraLookAt = new Vector3();
     private final Vector3 desiredCameraPosition = new Vector3();
@@ -217,6 +253,7 @@ public class Main extends ApplicationAdapter {
 
         rulesEngine = new AussieRulesEngine();
         bowlsPhysics = new AussieBowlsPhysics();
+        bowlAi = new BowlAi(bowlsPhysics, rulesEngine, MIN_RELEASE_SPEED, MAX_RELEASE_SPEED, AI_DIFFICULTY);
         end = new End();
         match = new Match();
         jack = new Jack();
@@ -271,6 +308,8 @@ public class Main extends ApplicationAdapter {
         ModelBuilder builder = new ModelBuilder();
         long attrs = VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal;
 
+        cloudsTexture = new Texture(Gdx.files.internal(CLOUDS_TEXTURE_FILE));
+        cloudsTexture.setWrap(Texture.TextureWrap.Repeat, Texture.TextureWrap.Repeat);
         buildSky(builder, attrs);
         SceneryBuilder.buildGroundAndHedge(builder, attrs, staticInstances, ownedModels);
 
@@ -358,6 +397,26 @@ public class Main extends ApplicationAdapter {
             staticInstances.add(pole);
         }
 
+        // Short alternating white/blue ditch markers spaced across the rear ditch's inner edge (the
+        // green/ditch seam, same rinkY as rearDitchWall above) — see DITCH_MARKER_* above.
+        Model ditchMarkerWhiteModel = builder.createCylinder(
+            DITCH_MARKER_DIAMETER_M, DITCH_MARKER_HEIGHT_M, DITCH_MARKER_DIAMETER_M, 8,
+            new Material(ColorAttribute.createDiffuse(Color.WHITE)), attrs
+        );
+        ownedModels.add(ditchMarkerWhiteModel);
+        Model ditchMarkerBlueModel = builder.createCylinder(
+            DITCH_MARKER_DIAMETER_M, DITCH_MARKER_HEIGHT_M, DITCH_MARKER_DIAMETER_M, 8,
+            new Material(ColorAttribute.createDiffuse(DITCH_MARKER_BLUE)), attrs
+        );
+        ownedModels.add(ditchMarkerBlueModel);
+        for (int i = 0; i < DITCH_MARKER_COUNT; i++) {
+            float markerX = (AussieBowlsPhysics.RINK_WIDTH_M / (DITCH_MARKER_COUNT + 1)) * (i + 1);
+            Model markerModel = (i % 2 == 0) ? ditchMarkerWhiteModel : ditchMarkerBlueModel;
+            ModelInstance marker = new ModelInstance(markerModel);
+            marker.transform.setToTranslation(markerX, DITCH_MARKER_HEIGHT_M / 2f, -AussieRulesEngine.GREEN_LENGTH);
+            staticInstances.add(marker);
+        }
+
         buildMat(builder, attrs);
 
         // Unit-radius spheres, scaled per-instance to the real (visual) radius.
@@ -369,17 +428,27 @@ public class Main extends ApplicationAdapter {
     }
 
     /**
-     * A large sphere surrounding the whole scene, lit fullbright (black diffuse + emissive colour)
-     * so it reads as sky regardless of the directional light's angle, with culling disabled so its
-     * inward-facing surface is visible from inside it.
+     * A large sphere surrounding the whole scene, textured with {@link #cloudsTexture} and lit
+     * fullbright (black diffuse + emissive texture, rather than the flat emissive colour used
+     * before) so it reads as sky regardless of the directional light's angle, with culling disabled
+     * so its inward-facing surface is visible from inside it. {@code createSphere}'s standard UV
+     * mapping runs the texture pole-to-pole/around once by default; {@link TextureAttribute#scaleU}/
+     * {@code scaleV} (with the texture's wrap mode set to {@code Repeat}) tile it several times
+     * instead — see {@link #SKY_CLOUD_U_REPEAT}.
      */
     private void buildSky(ModelBuilder builder, long attrs) {
+        TextureAttribute cloudsAttribute = TextureAttribute.createEmissive(cloudsTexture);
+        cloudsAttribute.scaleU = SKY_CLOUD_U_REPEAT;
+        cloudsAttribute.scaleV = SKY_CLOUD_V_REPEAT;
         Material material = new Material(
             ColorAttribute.createDiffuse(Color.BLACK),
-            ColorAttribute.createEmissive(SKY_COLOR),
+            cloudsAttribute,
             IntAttribute.createCullFace(GL20.GL_NONE)
         );
-        Model skyModel = builder.createSphere(SKY_RADIUS_M * 2f, SKY_RADIUS_M * 2f, SKY_RADIUS_M * 2f, 24, 24, material, attrs);
+        Model skyModel = builder.createSphere(
+            SKY_RADIUS_M * 2f, SKY_RADIUS_M * 2f, SKY_RADIUS_M * 2f, 24, 24, material,
+            attrs | VertexAttributes.Usage.TextureCoordinates
+        );
         ownedModels.add(skyModel);
         ModelInstance sky = new ModelInstance(skyModel);
         sky.transform.setToTranslation(
@@ -456,6 +525,7 @@ public class Main extends ApplicationAdapter {
         float delta = Gdx.graphics.getDeltaTime();
         updatePhysics(delta);
         updateEndLifecycle(delta);
+        updateAiTurn(delta);
         updateInstanceTransforms();
         updateCamera(delta);
 
@@ -493,7 +563,7 @@ public class Main extends ApplicationAdapter {
     }
 
     private void updateInstanceTransforms() {
-        float jackRadius = jack.getRadius() * JACK_VISUAL_RADIUS_SCALE;
+        float jackRadius = jack.getRadius() * VISUAL_RADIUS_SCALE;
         jackInstance.transform.setToTranslationAndScaling(
             jack.getPosition().x, jackRadius, -jack.getPosition().y,
             jackRadius, jackRadius, jackRadius
@@ -501,7 +571,7 @@ public class Main extends ApplicationAdapter {
 
         for (int i = 0; i < bowls.size; i++) {
             Bowl bowl = bowls.get(i);
-            float radius = bowl.getRadius() * BOWL_VISUAL_RADIUS_SCALE;
+            float radius = bowl.getRadius() * VISUAL_RADIUS_SCALE;
             bowlInstances.get(i).transform.setToTranslationAndScaling(
                 bowl.getPosition().x, radius, -bowl.getPosition().y,
                 radius, radius, radius
@@ -630,7 +700,8 @@ public class Main extends ApplicationAdapter {
         if (match.isComplete()) {
             hud.append("Match complete");
         } else {
-            hud.append(end.isComplete() ? "End complete!" : "Player " + (end.getCurrentPlayer() + 1) + "'s turn");
+            String turnLabel = "Player " + (end.getCurrentPlayer() + 1) + (end.getCurrentPlayer() == AI_PLAYER ? " (AI)" : "");
+            hud.append(end.isComplete() ? "End complete!" : turnLabel + "'s turn");
             hud.append('\n').append("P1 left: ").append(end.bowlsRemaining(0));
             hud.append('\n').append("P2 left: ").append(end.bowlsRemaining(1));
             if (!end.isComplete() && !canDeliver()) {
@@ -674,6 +745,28 @@ public class Main extends ApplicationAdapter {
         }
     }
 
+    /**
+     * Drives {@link #bowlAi}'s turn: once it's {@link #AI_PLAYER}'s turn and the green has
+     * settled, waits {@link #AI_THINK_DELAY_S} (purely for pacing) then delivers whatever
+     * {@link BowlAi#chooseDelivery} picks, via the same {@link #deliverBowl} path a human
+     * delivery uses.
+     */
+    private void updateAiTurn(float delta) {
+        if (match.isComplete() || end.getCurrentPlayer() != AI_PLAYER || !canDeliver()) {
+            aiThinkTimer = 0f;
+            return;
+        }
+
+        aiThinkTimer += delta;
+        if (aiThinkTimer < AI_THINK_DELAY_S) {
+            return;
+        }
+
+        DeliveryPlan plan = bowlAi.chooseDelivery(deliveryOrigin, jack, AI_PLAYER);
+        deliverBowl(plan.getDirection(), plan.getSpeed());
+        aiThinkTimer = 0f;
+    }
+
     private String describeResult(EndResult result) {
         if (result.isVoid()) {
             return "Jack out of bounds — end replayed";
@@ -700,7 +793,7 @@ public class Main extends ApplicationAdapter {
 
         Integer winner = result.getWinner();
         int nextStarter = result.isVoid() || winner == null ? previousStarter : winner;
-        end = new End(4, nextStarter);
+        end = new End(3, nextStarter);
         endResolved = false;
         pendingResult = null;
     }
@@ -794,17 +887,25 @@ public class Main extends ApplicationAdapter {
         // the mat launches it to the left.
         Vector2 travelDir = new Vector2(pull).scl(-1f).nor();
 
-        // Derived from which side of the mat's centre line the travel direction falls on: heading
-        // right is a backhand delivery (bias continues curving left), heading left is forehand
-        // (bias continues curving right) — no manual hand toggle needed.
-        boolean isBackhand = travelDir.x > 0f;
-
         float speed = MathUtils.clamp(
             MIN_RELEASE_SPEED + dragDistance * SPEED_PER_METER_OF_DRAG,
             MIN_RELEASE_SPEED,
             MAX_RELEASE_SPEED
         );
-        Vector2 velocity = travelDir.scl(speed);
+        deliverBowl(travelDir, speed);
+    }
+
+    /**
+     * Turns a chosen travel direction/speed into a new {@link Bowl} for whoever's currently up
+     * ({@link End#getCurrentPlayer()}) — the single place either a human ({@link #releaseBowl})
+     * or {@link #bowlAi} ({@link #updateAiTurn}) actually commits a delivery.
+     */
+    private void deliverBowl(Vector2 travelDir, float speed) {
+        // Derived from which side of the mat's centre line the travel direction falls on: heading
+        // right is a backhand delivery (bias continues curving left), heading left is forehand
+        // (bias continues curving right) — no manual hand toggle needed, for the AI either.
+        boolean isBackhand = travelDir.x > 0f;
+        Vector2 velocity = new Vector2(travelDir).scl(speed);
 
         Bowl bowl = new Bowl(
             new Vector2(deliveryOrigin),
@@ -846,6 +947,7 @@ public class Main extends ApplicationAdapter {
         shadowBatch.dispose();
         shadowLight.dispose();
         grassTexture.dispose();
+        cloudsTexture.dispose();
         for (Model model : ownedModels) {
             model.dispose();
         }
@@ -865,6 +967,9 @@ public class Main extends ApplicationAdapter {
             }
             if (!canDeliver()) {
                 return false; // wait for the green to settle, the end to be reset, or the match is over
+            }
+            if (end.getCurrentPlayer() == AI_PLAYER) {
+                return false; // it's the computer's turn — see updateAiTurn()
             }
             aiming = true;
             setAimTargetFromScreen(screenX, screenY);

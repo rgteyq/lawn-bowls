@@ -6,7 +6,7 @@ import io.github.lawn_bowls.model.Bowl
  * Turn order and bowl allocation for a single "end" between two players (index 0 and 1): they
  * alternate single deliveries until both have delivered [bowlsPerPlayer] bowls.
  */
-class End(val bowlsPerPlayer: Int = 4, val startingPlayer: Int = 0) {
+class End(val bowlsPerPlayer: Int = 3, val startingPlayer: Int = 0) {
 
     var currentPlayer: Int = startingPlayer
         private set

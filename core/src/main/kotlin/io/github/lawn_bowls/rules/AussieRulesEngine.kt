@@ -24,7 +24,14 @@ class AussieRulesEngine {
         }
     }
 
+    /**
+     * Unlike the jack, a bowl crossing the side boundary mid-roll doesn't kill it outright — only
+     * where it ends up at rest matters, so a bowl that runs wide and draws back in before stopping
+     * stays alive. [Bowl.velocity] reads as exactly zero once `AussieBowlsPhysics` has settled it
+     * (see its `applyStep`), so that's the signal this is safe to evaluate.
+     */
     private fun checkHorizontalBounds(bowl: Bowl) {
+        if (!bowl.velocity.isZero) return
         if (bowl.position.x <= RINK_MIN_X || bowl.position.x >= RINK_MAX_X) {
             bowl.isAlive = false
         }

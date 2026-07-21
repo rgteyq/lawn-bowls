@@ -33,11 +33,14 @@ meters, matching `Bowl`/`Jack` positions directly — no pixels-per-meter scale 
 recedes into the screen along the camera's default forward (`-Z`) direction; world Y is height above
 the green surface (`0`). `setUpCamera()` starts the `PerspectiveCamera` (65° FOV, `far = 250` to fit
 the sky sphere and surrounding scenery — see **Scenery** below) at the idle view — behind and above the
-mat (`idleCameraPosition = (2.5, 4.0, 9.0)`), looking up the length of the green
-(`idleCameraLookAt = (2.5, 0.2, -16)`) — a broadcast-style angle rather than looking straight down. The
+mat (`idleCameraPosition = (2.5, 3.5, 7.5)`), looking up the length of the green
+(`idleCameraLookAt = (2.5, 0.45, -14)`) — a broadcast-style angle rather than looking straight down. The
 camera sits noticeably further back than the mat itself (rink Y `1.0`), pushing the mat up into the
 upper-middle of the frame rather than the bottom edge — this leaves visible screen space *behind* the
-mat for the slingshot-style pull-back drag (see **Aiming and delivery** below).
+mat for the slingshot-style pull-back drag (see **Aiming and delivery** below). Pulled in closer and
+shallower than an earlier framing (`(2.5, 4.0, 9.0)` / `(2.5, 0.2, -16)`), which left a large dead patch
+of empty grass below the mat with nothing happening in it; this is tuned to leave the mat fully visible
+with just enough room below for the drag, not more.
 
 **Follow camera**: `updateCamera(delta)` (called every frame from `render()`, after physics/transforms
 update) is a simple two-state camera — idle vs. tracking a released bowl — blended with exponential
@@ -78,12 +81,19 @@ color, reused across every bowl that player delivers — rather than rebuilt per
   `ditchWallModel` bank (`DITCH_WALL_THICKNESS_M`) closes the vertical gap between the green surface
   and the recessed floor right at each green/ditch seam — without it that gap was open space (you
   could see through to the ground/sky behind it), which read as a floating disconnected slab rather
-  than a real ditch. Floor and wall use separate dark, low-reflectance colors (`DITCH_FLOOR_COLOR`,
-  a charcoal grey standing in for synthetic ditch lining, and `DITCH_WALL_COLOR`, near-black as if in
-  its own shadow) rather than the sand tone tried initially — sand read as a flat tan patch under
-  simple lighting, whereas the dark floor/wall pairing contrasts hard against the bright grass and
-  reads immediately as a recessed trough, with the wall-vs-floor shade difference adding a depth cue
-  a single flat color couldn't give it.
+  than a real ditch. The floor uses a dark, low-reflectance `DITCH_FLOOR_COLOR` (standing in for
+  synthetic ditch lining) rather than the sand tone tried initially — sand read as a flat tan patch
+  under simple lighting, whereas a dark floor contrasts hard against the bright grass and reads
+  immediately as a recessed trough. The wall/bank, though, is `DITCH_WALL_COLOR` — a grass tone
+  (a shade darker than the flat green surface, as if in its own shadow, for a depth cue), not the
+  near-black tried initially: a reference photo (`assets/back_ditch.jpeg`) showed the bank is turfed
+  grass right down to the ditch, not a dark trench wall, and near-black read as artificial next to
+  the bright grass.
+- **Ditch markers**: five short alternating white/blue pegs (`DITCH_MARKER_HEIGHT_M`/`DIAMETER_M`,
+  `DITCH_MARKER_COUNT`) spaced evenly across the rear ditch's inner edge, matching the small painted
+  markers labeled "Ditch Markers" in that same reference photo — a distinct real feature from the
+  corner poles below (low pegs spaced along the ditch, not tall posts at its corners). Front-ditch
+  markers were left out deliberately — that close to the mat/camera they'd clutter the delivery view.
 - **Boundary lines**: thin, deliberately faint/low-contrast boxes (`BOUNDARY_LINE_COLOR`, a muted
   putty tone, not bright paint) along both long edges of the rink, standing in for the string/peg
   markers on a real rink. They span only the green itself (`GREEN_LENGTH`) and stop at the rink
@@ -93,7 +103,8 @@ color, reused across every bowl that player delivers — rather than rebuilt per
 - **Corner poles**: a white 2m-tall cylinder (`POLE_HEIGHT_M`/`POLE_DIAMETER_M`) at each of the
   rink's two *rear* corners only (both boundary lines x the rear ditch's outer wall) — the front
   corners, by the mat and closest to the camera, don't need one. One shared `poleModel` reused
-  across both `ModelInstance`s.
+  across both `ModelInstance`s. (Not to be confused with the shorter ditch markers above — poles mark
+  the rink's out-of-bounds corners, markers gauge distance along the ditch.)
 - **Mat**: a thin cream box (`MAT_WIDTH_M` x `MAT_LENGTH_M`, `MAT_THICKNESS_M` ~1.5cm — realistic
   rubber-mat thickness) sitting on top of the green, built in `buildMat()`. Modeled after real
   Aero-style mats (referenced via a few product photos): two scattered clusters of small dark-green
@@ -123,7 +134,9 @@ a shimmering near-white yellow) all scale with the resulting release power, and 
 eases toward the real drag distance each frame (framerate-independent lerp, same pattern as the follow
 camera) so the band visibly grows rather than snapping to length.
 
-On release, `releaseBowl()` turns the drag into a new `Bowl`:
+On release, `releaseBowl()` computes a travel direction/speed from the drag and hands off to
+`deliverBowl(travelDir, speed)`, which is what actually turns those into a new `Bowl` — the one place
+either a human delivery or the AI's (`updateAiTurn()`, see **AI opponent** below) commits one:
 
 - **Direction** is the normalized vector from the release point back to the mat — the *opposite* of
   the drag vector (`pull`), matching the slingshot visual.
@@ -134,14 +147,20 @@ On release, `releaseBowl()` turns the drag into a new `Bowl`:
   `isBackhand = travelDir.x > 0f` — the bowl heading right is backhand (bias curves left), heading left
   is forehand (bias curves right). No key press needed. This matches the real technique of aiming wide
   on the side opposite your intended curve, so the bias arcs the bowl back in toward the jack rather
-  than further away from it.
+  than further away from it. `BowlAi`'s search respects the same rule rather than choosing a hand
+  independently.
 - **Owner** is the currently-up player from `End`; bowls render maroon for player 1, navy for player 2.
+  Player 2 is always the computer opponent — see **AI opponent** below.
 
-The drawn radius (`BOWL_VISUAL_RADIUS_SCALE`) is still exaggerated over the true physical scale for
+The drawn radius (`VISUAL_RADIUS_SCALE`) is still exaggerated over the true physical scale for
 visibility, same as the 2D view — this only affects rendering, collision/physics still use the real
-`bowl.radius`/`jack.radius`. The Aero-style accent ring from the 2D view isn't carried over yet (no
-built-in torus primitive in `ModelBuilder`); body color plus lighting/shading is the current
-differentiation — a follow-up if it's still needed.
+`bowl.radius`/`jack.radius`. Both the jack and every bowl share this one scale now — the jack
+previously had its own larger multiplier (on the reasoning that it's the harder of the two to spot at
+true scale), but that made it render *bigger* than a bowl, which is backwards: a real jack (~63mm) is
+about half a bowl's size (~130mm). Applying the same multiplier to both keeps that real proportion
+while still exaggerating both for visibility. The Aero-style accent ring from the 2D view isn't carried
+over yet (no built-in torus primitive in `ModelBuilder`); body color plus lighting/shading is the
+current differentiation — a follow-up if it's still needed.
 
 A top-left HUD (drawn with a `BitmapFont` at `0.8` scale via a 2D `SpriteBatch` pass after the 3D
 scene, split across a few short lines to fit the narrow window) shows whose turn it is, how many bowls
@@ -182,11 +201,17 @@ consistent with `Main`'s own ad hoc, per-shape helper style rather than a premat
 
 `Main.buildSky()` adds a large sphere (`SKY_RADIUS_M` = 200) surrounding the whole scene — `camera.far`
 is `250` to comfortably contain it. It's lit fullbright regardless of the directional light's angle via
-a black diffuse + emissive-color material (`gl_FragColor = diffuse * lighting + emissive`, so a black
-diffuse zeroes out the lighting term and only the emissive color shows), with culling disabled
+a black diffuse + emissive-*texture* material (`gl_FragColor = diffuse * lighting + emissive`, so a
+black diffuse zeroes out the lighting term and only the emissive texture shows — a flat emissive color
+originally, replaced with `assets/clouds.jpeg` textured on), with culling disabled
 (`IntAttribute.createCullFace(GL20.GL_NONE)`) so its inward-facing surface renders from inside it —
 without that, the sphere's front faces (visible from outside) would be back-face-culled from the
-camera's position inside the sphere, and nothing would draw.
+camera's position inside the sphere, and nothing would draw. `ModelBuilder.createSphere()`'s default UV
+mapping runs the texture once pole-to-pole/around, which would stretch one photo into a blurry smear
+across a 200m sphere; `TextureAttribute.scaleU`/`scaleV` (`SKY_CLOUD_U_REPEAT`/`V_REPEAT`, with the
+texture's wrap mode set to `Repeat`) tile it several times instead — the default shader applies that
+scale to the sphere's generated UVs directly, no manual UV/mesh work needed. The photo's soft, irregular
+cloud shapes hide the tile seams far better than a sharper or more geometric texture would have.
 
 **Shadows**: bowls, jack, and the mat cast shadows onto the grass via a `DirectionalShadowLight`
 (`environment.add(shadowLight)` *and* `environment.shadowMap = shadowLight` are both required — the
@@ -210,8 +235,10 @@ the shadow math itself.
 ## Turns
 
 `io.github.lawn_bowls.game.End` (in `core`) tracks a single "end": two players (index 0 and 1)
-alternate single deliveries until both have delivered `bowlsPerPlayer` bowls (default `4`, standard
-singles). It doesn't touch `Bowl`/`Jack` directly — `Main` reads it to gate and tag deliveries:
+alternate single deliveries until both have delivered `bowlsPerPlayer` bowls (default `3` — standard
+singles is usually `4`, but this game plays a shorter `3`-bowl variant; `Main.startNextEnd()` also
+passes `3` explicitly for each new end after the first). It doesn't touch `Bowl`/`Jack` directly —
+`Main` reads it to gate and tag deliveries:
 
 - `currentPlayer` (read-only from outside) is whose turn it is; `recordDelivery()` increments that
   player's count and flips it to the other player.
@@ -354,8 +381,12 @@ the ditch adds `0.3` (300mm) beyond the green at the far end, up to the back wal
 
 `updateEntityBounds(bowl: Bowl, jack: Jack)` mutates both entities in place each update:
 
-- **Horizontal boundary**: if the jack or the bowl crosses `x <= 0.0` or `x >= 5.0`, it's flagged
-  dead (`isAlive = false`).
+- **Horizontal boundary**: the jack is flagged dead (`isAlive = false`) the moment it crosses
+  `x <= 0.0` or `x >= 5.0`. A bowl is treated differently — crossing the line mid-roll doesn't kill
+  it; only where it *comes to rest* does, checked via `bowl.velocity.isZero` (set exactly zero by
+  `AussieBowlsPhysics` once a bowl settles). A bowl that runs wide of the boundary but draws back in
+  before stopping stays alive, matching how a real rink judges a bowl by its resting position, not
+  by momentarily touching the line.
 - **Jack in the ditch**: stays alive; once it reaches the back wall its position is clamped there and
   its velocity is zeroed.
 - **Bowl in the ditch**: if `isToucher` is true, it behaves like the jack (stays alive, stops at the
@@ -368,6 +399,55 @@ collision — velocity components along the collision normal are swapped between
 tangential components are untouched. If the hit happens while both are still on the green (not in the
 ditch) and the bowl isn't already a toucher, it sets `bowl.isToucher = true` and prints a console
 message.
+
+See `core/src/test/kotlin/io/github/lawn_bowls/rules/AussieRulesEngineTest.kt` for behavioral tests
+of the boundary rules, including the moving-vs-at-rest distinction for a bowl crossing the side line.
+
+## AI opponent
+
+`io.github.lawn_bowls.ai.BowlAi` (in `core`, Kotlin) drives Player 2 (navy) — the game is no longer
+local 2-player hot-seat, Player 2's turn is always the computer's. No machine learning: since
+`AussieBowlsPhysics` is fully deterministic, a search over candidate deliveries already finds strong
+shots, using the physics engine's own "live entity" update path
+(`AussieBowlsPhysics.update(bowl: Bowl, deltaTime: Float)`) as a forward simulator — nothing about that
+method requires the bowl it's given to be a real, on-screen one.
+
+`chooseDelivery(origin, jack, owner)`:
+
+1. Starts from `baseDir` — straight from `origin` at the jack's current position — and fans out ~9
+   angles either side of it (`ANGLE_RANGE_DEGREES`/`ANGLE_STEPS`) crossed with ~7 speeds across
+   `[minSpeed, maxSpeed]` (`SPEED_STEPS`), roughly 60-odd candidates. **Hand isn't a separate search
+   variable** — exactly like `Main.deliverBowl()`, it's derived from each candidate direction's sign
+   (`direction.x > 0` → backhand), so the search only ever varies angle and speed.
+2. Each candidate is forward-simulated to rest by `simulate()`: builds a throwaway scratch `Bowl` and
+   scratch `Jack`, then steps `physics.update(scratchBowl, dt)` → `rules.checkBowlToJackCollision(...)`
+   → `rules.updateEntityBounds(...)` in a loop (the same fixed `dt` the live game itself uses, so a
+   simulated outcome matches what actually happens if the plan is chosen) until it stops or dies, up to
+   a generous max-step safety cap. The scratch copies are built with their own new `Vector2`s
+   (`Vector2(jack.position)`, etc.) rather than via the data classes' `.copy()` — `.copy()` only
+   shallow-copies `Vector2` fields, which would leave the simulation mutating the *real* jack's
+   position/velocity out from under the live game.
+3. Scores each: `-distanceToJack` (closer is better), a small bonus for becoming a toucher, and a large
+   fixed penalty (minus its final distance, as a tiebreaker) if the scratch bowl died — off the side at
+   rest, or in the ditch as a non-toucher. Note there's no bowl-to-bowl collision to simulate: the live
+   game itself doesn't have any (`Main.updatePhysics` only ever calls `checkBowlToJackCollision`, never
+   anything pairwise between bowls), so the AI isn't missing anything the real game models either.
+4. The winning candidate isn't delivered exactly as found — a small random angle/speed jitter, scaled
+   by `difficulty` (`Main.AI_DIFFICULTY = 0.35`, 0 = perfect play every time, 1 = heavy jitter), is
+   applied first, so the AI is beatable rather than robotically optimal. It's a plain tunable constant,
+   not a settings UI — retune by feel after playing a few ends.
+
+`Main.updateAiTurn(delta)` (called every frame alongside `updateEndLifecycle`) drives the turn itself:
+once it's `AI_PLAYER`'s turn and the green has settled (`canDeliver()`), it waits `AI_THINK_DELAY_S`
+(~1s, pure pacing so it doesn't fire the instant it's up) then calls `chooseDelivery` and
+`deliverBowl(...)` with the result — the exact same commit path a human delivery uses, so it gets the
+same camera-follow tracking, HUD, everything. `DeliveryInputAdapter.touchDown` refuses input while it's
+`AI_PLAYER`'s turn, so a stray click can't hijack its delivery.
+
+See `core/src/test/kotlin/io/github/lawn_bowls/ai/BowlAiTest.kt` for behavioral tests, including
+(at `difficulty = 0`) re-simulating a chosen plan the same way the live game would and checking it
+actually comes to rest close to the jack — confirming the search finds a genuinely good shot, not just
+something plausible-looking.
 
 ## Gradle
 
