@@ -10,6 +10,7 @@ import com.badlogic.gdx.graphics.PerspectiveCamera;
 import com.badlogic.gdx.graphics.Texture;
 import com.badlogic.gdx.graphics.VertexAttributes;
 import com.badlogic.gdx.graphics.g2d.BitmapFont;
+import com.badlogic.gdx.graphics.g2d.GlyphLayout;
 import com.badlogic.gdx.graphics.g2d.SpriteBatch;
 import com.badlogic.gdx.graphics.g3d.Environment;
 import com.badlogic.gdx.graphics.g3d.Material;
@@ -33,6 +34,9 @@ import com.badlogic.gdx.math.collision.Ray;
 import com.badlogic.gdx.utils.Array;
 import com.badlogic.gdx.utils.ScreenUtils;
 import io.github.lawn_bowls.game.End;
+import io.github.lawn_bowls.game.EndResult;
+import io.github.lawn_bowls.game.Match;
+import io.github.lawn_bowls.game.Scoring;
 import io.github.lawn_bowls.model.Bowl;
 import io.github.lawn_bowls.model.Jack;
 import io.github.lawn_bowls.physics.AussieBowlsPhysics;
@@ -50,10 +54,29 @@ public class Main extends ApplicationAdapter {
     private static final String GRASS_TEXTURE_FILE = "bowling-green-tile2.jpeg";
     private static final float GRASS_TILE_SIZE_M = 2.0f; // one texture repeat per ~2m of rink
     private static final float GREEN_THICKNESS_M = 0.02f;
-    private static final float DITCH_RECESS_M = 0.15f; // ditch floor sits below the green surface
-    private static final float DITCH_THICKNESS_M = 0.10f;
-    private static final float BOUNDARY_LINE_WIDTH_M = 0.05f;
+    // Package-private: SceneryBuilder reuses these so the adjacent rinks' ditches (and the ground
+    // plane that must clear all of them) match the playable rink's own exactly.
+    static final float DITCH_RECESS_M = 0.15f; // ditch floor sits below the green surface
+    static final float DITCH_THICKNESS_M = 0.10f;
+    // Dark synthetic ditch lining (rubber/carpet, as on a real green) rather than visible sand — a
+    // flat tan patch didn't read as a recess under simple lighting, whereas a dark, low-reflectance
+    // material contrasts hard against the bright grass and immediately reads as a trough. The wall is
+    // deliberately darker than the floor (as if in its own shadow) for an added depth cue.
+    static final Color DITCH_FLOOR_COLOR = new Color(0.16f, 0.16f, 0.18f, 1f);
+    static final Color DITCH_WALL_COLOR = new Color(0.07f, 0.07f, 0.08f, 1f);
+    // A thin bank wall closing the vertical gap between the green surface and the recessed ditch
+    // floor right below it — without this, that gap is open space, showing whatever's behind it
+    // (ground/sky) rather than reading as a connected ditch.
+    static final float DITCH_WALL_THICKNESS_M = 0.02f;
+    private static final float BOUNDARY_LINE_WIDTH_M = 0.03f;
     private static final float BOUNDARY_LINE_HEIGHT_M = 0.02f;
+    // Deliberately faint/low-contrast against the grass rather than a bright painted line — the
+    // corner poles are the real out-of-bounds signal, this is just a subtle on-ground guide that
+    // shouldn't compete with them for attention.
+    private static final Color BOUNDARY_LINE_COLOR = new Color(0.58f, 0.62f, 0.50f, 1f);
+
+    private static final float POLE_HEIGHT_M = 2.0f;
+    private static final float POLE_DIAMETER_M = 0.08f;
 
     private static final float SKY_RADIUS_M = 200f;
     private static final Color SKY_COLOR = new Color(0.5f, 0.7f, 0.9f, 1f);
@@ -95,8 +118,21 @@ public class Main extends ApplicationAdapter {
     private static final float FOLLOW_LOOKAHEAD_M = 6.0f;
     private static final float CAMERA_LERP_SPEED = 3.0f;
 
+    // Scoreboard HUD: two colour-coded panels (one per player) split by a "v", with an ends
+    // counter below — styled after a real portable lawn-bowls A-frame scoreboard, drawn top-centre
+    // with the same ShapeRenderer/SpriteBatch/BitmapFont already used for the rest of the HUD.
+    private static final float SCOREBOARD_PANEL_WIDTH = 70f;
+    private static final float SCOREBOARD_PANEL_HEIGHT = 60f;
+    private static final float SCOREBOARD_PANEL_GAP = 26f;
+    private static final float SCOREBOARD_TOP_MARGIN = 8f;
+    // How long the "Player N scores M" message lingers, and the green stays put, before the next
+    // end's bowls/jack are auto-reset — long enough to read the final head.
+    private static final float END_TRANSITION_DELAY_S = 2.5f;
+
     private SpriteBatch batch;
     private BitmapFont font;
+    private BitmapFont scoreFont;
+    private GlyphLayout layout;
     private ShapeRenderer shapeRenderer;
     private Texture grassTexture;
 
@@ -130,8 +166,17 @@ public class Main extends ApplicationAdapter {
     private AussieRulesEngine rulesEngine;
     private AussieBowlsPhysics bowlsPhysics;
     private End end;
+    private Match match;
     private Jack jack;
     private Array<Bowl> bowls;
+
+    // End-to-end lifecycle: set once the just-completed end has been scored, cleared again once
+    // the next end's bowls/jack are reset. lastEndMessage/endTransitionTimer drive the on-screen
+    // pause (see END_TRANSITION_DELAY_S) between a scored end and the green resetting.
+    private boolean endResolved = false;
+    private EndResult pendingResult;
+    private String lastEndMessage = "";
+    private float endTransitionTimer;
 
     private final Vector2 deliveryOrigin = new Vector2(AussieBowlsPhysics.RINK_WIDTH_M / 2f, 1.0f);
     private final Vector2 aimTarget = new Vector2();
@@ -165,11 +210,15 @@ public class Main extends ApplicationAdapter {
         batch = new SpriteBatch();
         font = new BitmapFont();
         font.getData().setScale(0.8f);
+        scoreFont = new BitmapFont();
+        scoreFont.getData().setScale(2.4f);
+        layout = new GlyphLayout();
         shapeRenderer = new ShapeRenderer();
 
         rulesEngine = new AussieRulesEngine();
         bowlsPhysics = new AussieBowlsPhysics();
         end = new End();
+        match = new Match();
         jack = new Jack();
         bowls = new Array<>();
         jack.getPosition().set(2.5f, 24f);
@@ -239,32 +288,75 @@ public class Main extends ApplicationAdapter {
         );
         staticInstances.add(grass);
 
-        float adjacentRinkLength = AussieRulesEngine.DITCH_BACK_WALL;
-        float adjacentRinkVRepeat = adjacentRinkLength / GRASS_TILE_SIZE_M;
+        // Grass only — the adjacent rinks' own ditches are separate sand-colored boxes, not part of
+        // this texture, matching how the playable rink's grass and ditch are modeled separately.
+        float adjacentRinkVRepeat = AussieRulesEngine.GREEN_LENGTH / GRASS_TILE_SIZE_M;
         SceneryBuilder.buildSurroundings(
             builder, attrs, grassTexture, grassURepeat, adjacentRinkVRepeat, staticInstances, ownedModels
         );
 
-        Model ditchModel = box(builder, AussieBowlsPhysics.RINK_WIDTH_M, DITCH_THICKNESS_M, AussieRulesEngine.DITCH_DEPTH, Color.DARK_GRAY, attrs);
-        ModelInstance ditch = new ModelInstance(ditchModel);
-        ditch.transform.setToTranslation(
+        // A ditch at both ends of the green, matching a real rink (play alternates direction end to
+        // end, so both ends need one) — the rear ditch beyond GREEN_LENGTH, and a mirrored front
+        // ditch just short of rinkY=0, behind the mat.
+        Model ditchModel = box(builder, AussieBowlsPhysics.RINK_WIDTH_M, DITCH_THICKNESS_M, AussieRulesEngine.DITCH_DEPTH, DITCH_FLOOR_COLOR, attrs);
+        ModelInstance rearDitch = new ModelInstance(ditchModel);
+        rearDitch.transform.setToTranslation(
             AussieBowlsPhysics.RINK_WIDTH_M / 2f,
             -DITCH_RECESS_M - DITCH_THICKNESS_M / 2f,
             -(AussieRulesEngine.GREEN_LENGTH + AussieRulesEngine.DITCH_DEPTH / 2f)
         );
-        staticInstances.add(ditch);
+        staticInstances.add(rearDitch);
+        ModelInstance frontDitch = new ModelInstance(ditchModel);
+        frontDitch.transform.setToTranslation(
+            AussieBowlsPhysics.RINK_WIDTH_M / 2f,
+            -DITCH_RECESS_M - DITCH_THICKNESS_M / 2f,
+            AussieRulesEngine.DITCH_DEPTH / 2f
+        );
+        staticInstances.add(frontDitch);
 
-        // Rink boundary markers along both long edges, from the mat end to the back of the ditch.
-        float fullLength = AussieRulesEngine.GREEN_LENGTH + AussieRulesEngine.DITCH_DEPTH;
-        Model boundaryModel = box(builder, BOUNDARY_LINE_WIDTH_M, BOUNDARY_LINE_HEIGHT_M, fullLength, Color.WHITE, attrs);
+        // Bank walls closing the vertical gap between the green surface and each ditch floor, right
+        // at the green/ditch seam (front at rinkY=0, rear at rinkY=GREEN_LENGTH).
+        Model ditchWallModel = box(
+            builder, AussieBowlsPhysics.RINK_WIDTH_M, DITCH_RECESS_M, DITCH_WALL_THICKNESS_M, DITCH_WALL_COLOR, attrs
+        );
+        ModelInstance frontDitchWall = new ModelInstance(ditchWallModel);
+        frontDitchWall.transform.setToTranslation(AussieBowlsPhysics.RINK_WIDTH_M / 2f, -DITCH_RECESS_M / 2f, 0f);
+        staticInstances.add(frontDitchWall);
+        ModelInstance rearDitchWall = new ModelInstance(ditchWallModel);
+        rearDitchWall.transform.setToTranslation(
+            AussieBowlsPhysics.RINK_WIDTH_M / 2f, -DITCH_RECESS_M / 2f, -AussieRulesEngine.GREEN_LENGTH
+        );
+        staticInstances.add(rearDitchWall);
+
+        float backOuterZ = -(AussieRulesEngine.GREEN_LENGTH + AussieRulesEngine.DITCH_DEPTH);
+
+        // Rink boundary markers along both long edges, spanning only the green itself — they stop at
+        // the rink edge rather than running on across the ditch.
+        float boundaryCenterZ = -AussieRulesEngine.GREEN_LENGTH / 2f;
+        Model boundaryModel = box(
+            builder, BOUNDARY_LINE_WIDTH_M, BOUNDARY_LINE_HEIGHT_M, AussieRulesEngine.GREEN_LENGTH, BOUNDARY_LINE_COLOR, attrs
+        );
         ModelInstance leftBoundary = new ModelInstance(boundaryModel);
-        leftBoundary.transform.setToTranslation(BOUNDARY_LINE_WIDTH_M / 2f, BOUNDARY_LINE_HEIGHT_M / 2f, -fullLength / 2f);
+        leftBoundary.transform.setToTranslation(BOUNDARY_LINE_WIDTH_M / 2f, BOUNDARY_LINE_HEIGHT_M / 2f, boundaryCenterZ);
         staticInstances.add(leftBoundary);
         ModelInstance rightBoundary = new ModelInstance(boundaryModel);
         rightBoundary.transform.setToTranslation(
-            AussieBowlsPhysics.RINK_WIDTH_M - BOUNDARY_LINE_WIDTH_M / 2f, BOUNDARY_LINE_HEIGHT_M / 2f, -fullLength / 2f
+            AussieBowlsPhysics.RINK_WIDTH_M - BOUNDARY_LINE_WIDTH_M / 2f, BOUNDARY_LINE_HEIGHT_M / 2f, boundaryCenterZ
         );
         staticInstances.add(rightBoundary);
+
+        // White out-of-bounds poles at the rink's two rear corners only — the front corners (by the
+        // mat, closest to the camera) don't need one.
+        Model poleModel = builder.createCylinder(
+            POLE_DIAMETER_M, POLE_HEIGHT_M, POLE_DIAMETER_M, 12, new Material(ColorAttribute.createDiffuse(Color.WHITE)), attrs
+        );
+        ownedModels.add(poleModel);
+        float[] poleXs = {0f, AussieBowlsPhysics.RINK_WIDTH_M};
+        for (float poleX : poleXs) {
+            ModelInstance pole = new ModelInstance(poleModel);
+            pole.transform.setToTranslation(poleX, POLE_HEIGHT_M / 2f, backOuterZ);
+            staticInstances.add(pole);
+        }
 
         buildMat(builder, attrs);
 
@@ -363,6 +455,7 @@ public class Main extends ApplicationAdapter {
     public void render() {
         float delta = Gdx.graphics.getDeltaTime();
         updatePhysics(delta);
+        updateEndLifecycle(delta);
         updateInstanceTransforms();
         updateCamera(delta);
 
@@ -391,8 +484,11 @@ public class Main extends ApplicationAdapter {
             aimVisualDragDistance = 0f;
         }
 
+        drawScoreboardPanels();
+
         batch.begin();
         drawHud();
+        drawScoreboardText();
         batch.end();
     }
 
@@ -531,13 +627,140 @@ public class Main extends ApplicationAdapter {
     /** Turn/bowls-remaining status, drawn top-left as a few short lines. */
     private void drawHud() {
         StringBuilder hud = new StringBuilder();
-        hud.append(end.isComplete() ? "End complete!" : "Player " + (end.getCurrentPlayer() + 1) + "'s turn");
-        hud.append('\n').append("P1 left: ").append(end.bowlsRemaining(0));
-        hud.append('\n').append("P2 left: ").append(end.bowlsRemaining(1));
-        if (!end.isComplete() && !end.canDeliver(bowls)) {
-            hud.append('\n').append("(rolling...)");
+        if (match.isComplete()) {
+            hud.append("Match complete");
+        } else {
+            hud.append(end.isComplete() ? "End complete!" : "Player " + (end.getCurrentPlayer() + 1) + "'s turn");
+            hud.append('\n').append("P1 left: ").append(end.bowlsRemaining(0));
+            hud.append('\n').append("P2 left: ").append(end.bowlsRemaining(1));
+            if (!end.isComplete() && !canDeliver()) {
+                hud.append('\n').append("(rolling...)");
+            }
         }
         font.draw(batch, hud.toString(), 8f, Gdx.graphics.getHeight() - 8f);
+    }
+
+    /** Whether the current player may deliver right now: the match isn't over and [End.canDeliver]. */
+    private boolean canDeliver() {
+        return !match.isComplete() && end.canDeliver(bowls);
+    }
+
+    /**
+     * Scores a just-completed, fully-settled end, records it on {@link #match}, and (after a short
+     * on-screen pause, {@link #END_TRANSITION_DELAY_S}) resets the green and starts the next end —
+     * handed to the previous end's winner, or replayed by the same starter if the jack was knocked
+     * dead ({@link EndResult#isVoid()}).
+     */
+    private void updateEndLifecycle(float delta) {
+        if (match.isComplete()) {
+            return;
+        }
+
+        if (!endResolved) {
+            if (end.isComplete() && end.allSettled(bowls)) {
+                EndResult result = Scoring.scoreEnd(bowls, jack);
+                match.recordEnd(result);
+                lastEndMessage = describeResult(result);
+                pendingResult = result;
+                endResolved = true;
+                endTransitionTimer = END_TRANSITION_DELAY_S;
+            }
+            return;
+        }
+
+        endTransitionTimer -= delta;
+        if (endTransitionTimer <= 0f) {
+            startNextEnd(pendingResult);
+        }
+    }
+
+    private String describeResult(EndResult result) {
+        if (result.isVoid()) {
+            return "Jack out of bounds — end replayed";
+        }
+        Integer winner = result.getWinner();
+        if (winner == null) {
+            return "No shots this end";
+        }
+        return "Player " + (winner + 1) + " scores " + result.getShots();
+    }
+
+    /** Clears the green and starts the next end, per {@link #updateEndLifecycle}'s handoff rules. */
+    private void startNextEnd(EndResult result) {
+        int previousStarter = end.getStartingPlayer();
+
+        bowls.clear();
+        bowlInstances.clear();
+        trackedBowlIndex = -1;
+
+        jack.getPosition().set(2.5f, 24f);
+        jack.getVelocity().setZero();
+        jack.setAlive(true);
+        jack.setInDitch(false);
+
+        Integer winner = result.getWinner();
+        int nextStarter = result.isVoid() || winner == null ? previousStarter : winner;
+        end = new End(4, nextStarter);
+        endResolved = false;
+        pendingResult = null;
+    }
+
+    /**
+     * Two colour-coded filled panels (one per player, matching {@link #player0Color}/
+     * {@link #player1Color}) split by a "v" — the coloured-box part of the scoreboard, drawn in
+     * screen space via {@link #shapeRenderer} before {@link #drawScoreboardText} overlays the
+     * numbers/labels in the same batch pass as {@link #drawHud}.
+     */
+    private void drawScoreboardPanels() {
+        float totalWidth = SCOREBOARD_PANEL_WIDTH * 2 + SCOREBOARD_PANEL_GAP;
+        float left = (Gdx.graphics.getWidth() - totalWidth) / 2f;
+        float panelY = Gdx.graphics.getHeight() - SCOREBOARD_TOP_MARGIN - SCOREBOARD_PANEL_HEIGHT;
+
+        shapeRenderer.setProjectionMatrix(batch.getProjectionMatrix());
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled);
+        shapeRenderer.setColor(player0Color);
+        shapeRenderer.rect(left, panelY, SCOREBOARD_PANEL_WIDTH, SCOREBOARD_PANEL_HEIGHT);
+        shapeRenderer.setColor(player1Color);
+        shapeRenderer.rect(
+            left + SCOREBOARD_PANEL_WIDTH + SCOREBOARD_PANEL_GAP, panelY, SCOREBOARD_PANEL_WIDTH, SCOREBOARD_PANEL_HEIGHT
+        );
+        shapeRenderer.end();
+    }
+
+    /** Score numbers, the "v" divider, ends counter/result, and transient end message. */
+    private void drawScoreboardText() {
+        float totalWidth = SCOREBOARD_PANEL_WIDTH * 2 + SCOREBOARD_PANEL_GAP;
+        float left = (Gdx.graphics.getWidth() - totalWidth) / 2f;
+        float panelY = Gdx.graphics.getHeight() - SCOREBOARD_TOP_MARGIN - SCOREBOARD_PANEL_HEIGHT;
+        float panelCenterY = panelY + SCOREBOARD_PANEL_HEIGHT / 2f;
+        int[] scores = match.getScores();
+
+        drawCentered(scoreFont, String.valueOf(scores[0]), left + SCOREBOARD_PANEL_WIDTH / 2f, panelCenterY);
+        drawCentered(
+            scoreFont, String.valueOf(scores[1]),
+            left + SCOREBOARD_PANEL_WIDTH + SCOREBOARD_PANEL_GAP + SCOREBOARD_PANEL_WIDTH / 2f, panelCenterY
+        );
+        drawCentered(font, "v", left + SCOREBOARD_PANEL_WIDTH + SCOREBOARD_PANEL_GAP / 2f, panelCenterY);
+
+        String endsLabel;
+        if (match.isComplete()) {
+            int winner = match.getWinner();
+            endsLabel = "Player " + (winner + 1) + " wins " + scores[winner] + "–" + scores[1 - winner];
+        } else if (match.getEndsPlayed() >= 7) {
+            endsLabel = "Tie-break end " + (match.getEndsPlayed() + 1);
+        } else {
+            endsLabel = "End " + (match.getEndsPlayed() + 1) + " / 7";
+        }
+        drawCentered(font, endsLabel, left + totalWidth / 2f, panelY - 8f);
+
+        if (!lastEndMessage.isEmpty() && endResolved && endTransitionTimer > 0f) {
+            drawCentered(font, lastEndMessage, left + totalWidth / 2f, panelY - 24f);
+        }
+    }
+
+    private void drawCentered(BitmapFont f, String text, float centerX, float centerY) {
+        layout.setText(f, text);
+        f.draw(batch, text, centerX - layout.width / 2f, centerY + layout.height / 2f);
     }
 
     private void updatePhysics(float delta) {
@@ -557,8 +780,8 @@ public class Main extends ApplicationAdapter {
 
     /** Converts a slingshot-style pull (drag distance/direction behind the mat) into a released bowl. */
     private void releaseBowl() {
-        if (!end.canDeliver(bowls)) {
-            return; // end is finished, or a previous bowl hasn't come to rest yet
+        if (!canDeliver()) {
+            return; // end/match is finished, or a previous bowl hasn't come to rest yet
         }
 
         Vector2 pull = new Vector2(aimTarget).sub(deliveryOrigin);
@@ -617,6 +840,7 @@ public class Main extends ApplicationAdapter {
     public void dispose() {
         batch.dispose();
         font.dispose();
+        scoreFont.dispose();
         shapeRenderer.dispose();
         modelBatch.dispose();
         shadowBatch.dispose();
@@ -639,8 +863,8 @@ public class Main extends ApplicationAdapter {
             if (button != Input.Buttons.LEFT) {
                 return false;
             }
-            if (!end.canDeliver(bowls)) {
-                return false; // wait for the green to settle, or the end to be reset
+            if (!canDeliver()) {
+                return false; // wait for the green to settle, the end to be reset, or the match is over
             }
             aiming = true;
             setAimTargetFromScreen(screenX, screenY);

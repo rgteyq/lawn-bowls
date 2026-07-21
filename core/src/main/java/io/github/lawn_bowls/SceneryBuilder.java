@@ -24,20 +24,22 @@ import io.github.lawn_bowls.rules.AussieRulesEngine;
 final class SceneryBuilder {
     private static final float GROUND_SIZE_M = 200f;
     private static final float GROUND_THICKNESS_M = 0.02f;
-    // Clears the grass box's underside (top -0.01f, bottom -0.03f at GREEN_THICKNESS_M=0.02f) with margin.
-    private static final float GROUND_Y = -0.06f;
+    // Must clear the ditch floor (Main.DITCH_RECESS_M + Main.DITCH_THICKNESS_M below the green), not
+    // just the grass underside — the ground box spans the whole scene including under the ditch, so
+    // sitting any higher than the ditch floor would bury the sunken ditch under solid ground.
+    private static final float GROUND_Y = -(Main.DITCH_RECESS_M + Main.DITCH_THICKNESS_M) - 0.05f;
 
     private static final float HEDGE_HEIGHT_M = 0.6f;
     private static final float HEDGE_WIDTH_M = 0.4f;
     // Set back from the rink centreline far enough to clear the adjacent rink strips below
-    // (X [-6,-1] and [6,11], i.e. up to 8.5m from this rink's centre at X=2.5).
+    // (X [-5,0] and [5,10], i.e. up to 7.5m from this rink's centre at X=2.5).
     private static final float HEDGE_X_OFFSET_M = 10f;
     private static final float HEDGE_NEAR_Z = 2f; // slightly camera-side of the mat
     private static final float HEDGE_FAR_Z = -(AussieRulesEngine.DITCH_BACK_WALL + 3f); // past the ditch, with margin
 
     private static final float RINK_CENTER_X = AussieBowlsPhysics.RINK_WIDTH_M / 2f;
-    private static final float RINK_LENGTH_M = AussieRulesEngine.DITCH_BACK_WALL; // green + ditch
-    private static final float ADJACENT_RINK_GAP_M = 1f; // verge between rinks
+    // No verge: the out-of-bounds boundary line is the only thing separating adjacent rinks.
+    private static final float ADJACENT_RINK_GAP_M = 0f;
     private static final float ADJACENT_RINK_OFFSET_M = ADJACENT_RINK_GAP_M + AussieBowlsPhysics.RINK_WIDTH_M;
 
     private static final float CLUBHOUSE_WIDTH_M = 8f;
@@ -97,16 +99,51 @@ final class SceneryBuilder {
         Array<ModelInstance> staticInstances, Array<Model> ownedModels
     ) {
         Model adjacentRinkModel = texturedBox(
-            builder, AussieBowlsPhysics.RINK_WIDTH_M, 0.02f, RINK_LENGTH_M,
+            builder, AussieBowlsPhysics.RINK_WIDTH_M, 0.02f, AussieRulesEngine.GREEN_LENGTH,
             grassTexture, grassURepeat, grassVRepeat, attrs, ownedModels
         );
-        float rinkZ = -RINK_LENGTH_M / 2f;
-        ModelInstance leftRink = new ModelInstance(adjacentRinkModel);
-        leftRink.transform.setToTranslation(RINK_CENTER_X - ADJACENT_RINK_OFFSET_M, -0.01f, rinkZ);
-        staticInstances.add(leftRink);
-        ModelInstance rightRink = new ModelInstance(adjacentRinkModel);
-        rightRink.transform.setToTranslation(RINK_CENTER_X + ADJACENT_RINK_OFFSET_M, -0.01f, rinkZ);
-        staticInstances.add(rightRink);
+        float rinkZ = -AussieRulesEngine.GREEN_LENGTH / 2f;
+        float[] adjacentRinkXs = {RINK_CENTER_X - ADJACENT_RINK_OFFSET_M, RINK_CENTER_X + ADJACENT_RINK_OFFSET_M};
+        for (int i = 0; i < adjacentRinkXs.length; i++) {
+            float rinkX = adjacentRinkXs[i];
+            ModelInstance rink = new ModelInstance(adjacentRinkModel);
+            rink.transform.setToTranslation(rinkX, -0.01f, rinkZ);
+            staticInstances.add(rink);
+        }
+
+        // A front and rear ditch for each adjacent rink too, matching the playable rink's own
+        // (same recess/thickness/color, reused from Main so they can't drift out of sync).
+        Model ditchModel = box(
+            builder, AussieBowlsPhysics.RINK_WIDTH_M, Main.DITCH_THICKNESS_M, AussieRulesEngine.DITCH_DEPTH,
+            Main.DITCH_FLOOR_COLOR, attrs, ownedModels
+        );
+        float ditchY = -Main.DITCH_RECESS_M - Main.DITCH_THICKNESS_M / 2f;
+        float rearDitchZ = -(AussieRulesEngine.GREEN_LENGTH + AussieRulesEngine.DITCH_DEPTH / 2f);
+        float frontDitchZ = AussieRulesEngine.DITCH_DEPTH / 2f;
+        for (float rinkX : adjacentRinkXs) {
+            ModelInstance rearDitch = new ModelInstance(ditchModel);
+            rearDitch.transform.setToTranslation(rinkX, ditchY, rearDitchZ);
+            staticInstances.add(rearDitch);
+            ModelInstance frontDitch = new ModelInstance(ditchModel);
+            frontDitch.transform.setToTranslation(rinkX, ditchY, frontDitchZ);
+            staticInstances.add(frontDitch);
+        }
+
+        // Bank walls closing the vertical gap between each adjacent rink's grass and its ditch floor,
+        // right at the green/ditch seam — same fix as the playable rink's own (see Main.buildScene()).
+        Model ditchWallModel = box(
+            builder, AussieBowlsPhysics.RINK_WIDTH_M, Main.DITCH_RECESS_M, Main.DITCH_WALL_THICKNESS_M,
+            Main.DITCH_WALL_COLOR, attrs, ownedModels
+        );
+        float wallY = -Main.DITCH_RECESS_M / 2f;
+        for (float rinkX : adjacentRinkXs) {
+            ModelInstance frontWall = new ModelInstance(ditchWallModel);
+            frontWall.transform.setToTranslation(rinkX, wallY, 0f);
+            staticInstances.add(frontWall);
+            ModelInstance rearWall = new ModelInstance(ditchWallModel);
+            rearWall.transform.setToTranslation(rinkX, wallY, -AussieRulesEngine.GREEN_LENGTH);
+            staticInstances.add(rearWall);
+        }
 
         Model wallsModel = box(builder, CLUBHOUSE_WIDTH_M, CLUBHOUSE_HEIGHT_M, CLUBHOUSE_DEPTH_M, new Color(0.82f, 0.78f, 0.70f, 1f), attrs, ownedModels);
         ModelInstance walls = new ModelInstance(wallsModel);

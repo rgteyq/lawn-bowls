@@ -71,10 +71,29 @@ color, reused across every bowl that player delivers — rather than rebuilt per
   candidate file was actually a WebP image saved with a `.jpg` extension — libGDX's loader can't
   decode WebP, so it had to be re-encoded as a real JPEG before it would load (`file <path>` /
   `sips -g format` are the quick ways to catch this if a future asset swap silently fails the same way).
-- **Ditch**: a dark box recessed `DITCH_RECESS_M` (15cm) below the green surface — a real sunken
-  ditch, not just a differently-colored strip.
-- **Boundary lines**: thin white boxes along both long edges of the rink, standing in for the
-  string/peg markers on a real rink.
+- **Ditch**: a box recessed `DITCH_RECESS_M` (15cm) below the green surface — a real sunken ditch,
+  not just a differently-colored strip. There's one at *both* ends of the green (`rearDitch` beyond
+  `GREEN_LENGTH`, `frontDitch` just short of `rinkY=0` behind the mat), sharing a single `ditchModel`
+  — matching a real rink, where play alternates direction end to end so both ends need one. A thin
+  `ditchWallModel` bank (`DITCH_WALL_THICKNESS_M`) closes the vertical gap between the green surface
+  and the recessed floor right at each green/ditch seam — without it that gap was open space (you
+  could see through to the ground/sky behind it), which read as a floating disconnected slab rather
+  than a real ditch. Floor and wall use separate dark, low-reflectance colors (`DITCH_FLOOR_COLOR`,
+  a charcoal grey standing in for synthetic ditch lining, and `DITCH_WALL_COLOR`, near-black as if in
+  its own shadow) rather than the sand tone tried initially — sand read as a flat tan patch under
+  simple lighting, whereas the dark floor/wall pairing contrasts hard against the bright grass and
+  reads immediately as a recessed trough, with the wall-vs-floor shade difference adding a depth cue
+  a single flat color couldn't give it.
+- **Boundary lines**: thin, deliberately faint/low-contrast boxes (`BOUNDARY_LINE_COLOR`, a muted
+  putty tone, not bright paint) along both long edges of the rink, standing in for the string/peg
+  markers on a real rink. They span only the green itself (`GREEN_LENGTH`) and stop at the rink
+  edge — they don't run on across the ditch. They're the *only* thing separating adjacent rinks —
+  see Scenery below. Kept subtle on purpose: the corner poles are the real out-of-bounds signal, so
+  the line shouldn't compete with them for attention.
+- **Corner poles**: a white 2m-tall cylinder (`POLE_HEIGHT_M`/`POLE_DIAMETER_M`) at each of the
+  rink's two *rear* corners only (both boundary lines x the rear ditch's outer wall) — the front
+  corners, by the mat and closest to the camera, don't need one. One shared `poleModel` reused
+  across both `ModelInstance`s.
 - **Mat**: a thin cream box (`MAT_WIDTH_M` x `MAT_LENGTH_M`, `MAT_THICKNESS_M` ~1.5cm — realistic
   rubber-mat thickness) sitting on top of the green, built in `buildMat()`. Modeled after real
   Aero-style mats (referenced via a few product photos): two scattered clusters of small dark-green
@@ -126,7 +145,8 @@ differentiation — a follow-up if it's still needed.
 
 A top-left HUD (drawn with a `BitmapFont` at `0.8` scale via a 2D `SpriteBatch` pass after the 3D
 scene, split across a few short lines to fit the narrow window) shows whose turn it is, how many bowls
-each player has left, and `"End complete!"` once both have delivered their full allocation.
+each player has left, and `"End complete!"` once both have delivered their full allocation. A separate
+scoreboard panel (top-centre) shows the running match score — see **Scoring** below.
 
 ## Scenery
 
@@ -140,11 +160,25 @@ consistent with `Main`'s own ad hoc, per-shape helper style rather than a premat
 
 - **`buildGroundAndHedge()`**: a large (`200m²`) flat ground plane, positioned just below the grass
   box so the rink doesn't float against open sky, plus a hedge perimeter (two long boxes) set back far
-  enough from the rink centreline to clear the adjacent rinks below.
+  enough from the rink centreline to clear the adjacent rinks below. `GROUND_Y` must clear the ditch
+  floor (`Main.DITCH_RECESS_M + Main.DITCH_THICKNESS_M`), not just the grass underside — the ground
+  box spans the whole scene footprint including under the ditch, so sitting any higher would bury it
+  under solid ground (this was an actual bug: the ditch existed but was fully hidden until the ground
+  was pushed below it).
 - **`buildSurroundings()`**: two adjacent rink strips flanking the playable one (reusing `Main`'s grass
-  `Texture` and tiling, not a new texture), a simple clubhouse (wall box + roof box) beyond the ditch,
-  a few spectator benches in front of it, and a handful of trunk-plus-foliage-sphere tree impostors
-  scattered around the clubhouse/hedge perimeter.
+  `Texture` and tiling, not a new texture), each with its own front and rear ditch *and* bank wall
+  matching the playable rink's own (same recess/thickness/color/wall-thickness, reused from `Main`'s
+  package-private `DITCH_RECESS_M`/`DITCH_THICKNESS_M`/`DITCH_FLOOR_COLOR`/`DITCH_WALL_COLOR`/
+  `DITCH_WALL_THICKNESS_M` so they
+  can't drift out of sync), a simple clubhouse (wall box + roof box) beyond the ditch, a few spectator
+  benches in front of it, and a handful of trunk-plus-foliage-sphere tree impostors scattered around
+  the clubhouse/hedge perimeter.
+  The adjacent strips sit flush against the playable rink (`ADJACENT_RINK_GAP_M = 0`) — no verge
+  between rinks, so the faint boundary line is the only separation, matching a real green where rinks
+  share no physical gap. Because the adjacent strips reuse the exact same grass `Texture`/tiling as
+  the playable rink, they blend seamlessly into one continuous green rather than reading as a visibly
+  separate patch — only the boundary line and corner poles mark where one rink ends and the next
+  begins.
 
 `Main.buildSky()` adds a large sphere (`SKY_RADIUS_M` = 200) surrounding the whole scene — `camera.far`
 is `250` to comfortably contain it. It's lit fullbright regardless of the directional light's angle via
@@ -184,10 +218,19 @@ singles). It doesn't touch `Bowl`/`Jack` directly — `Main` reads it to gate an
 - `bowlsRemaining(player)` is `bowlsPerPlayer` minus what they've delivered so far.
 - `isComplete` is true once both players have delivered all their bowls.
 - `canDeliver(bowls)` is the single gate for "is a new delivery allowed right now": false once the end
-  is complete, or while any bowl passed in is still alive and moving (`velocity` non-zero) — deliveries
-  happen one at a time, never mid-roll. `Main.DeliveryInputAdapter.touchDown` checks this before
-  starting an aim, and `releaseBowl()` checks it again before committing the bowl, so bowls can't be
-  fired while a previous one is still in flight.
+  is complete, or while any bowl passed in is still alive and moving (delegates to `allSettled`) —
+  deliveries happen one at a time, never mid-roll. `Main.DeliveryInputAdapter.touchDown` checks this
+  (via `Main.canDeliver()`, which also checks the match isn't over — see **Scoring**) before starting
+  an aim, and `releaseBowl()` checks it again before committing the bowl, so bowls can't be fired while
+  a previous one is still in flight.
+- `allSettled(bowls)` is `canDeliver`'s "nothing still rolling" half, pulled out on its own because
+  `Main` needs the same check separately: an end can be `isComplete` (all bowls delivered) while the
+  very last one is still rolling, so scoring has to wait for `end.isComplete() && end.allSettled(bowls)`
+  together, not `isComplete` alone.
+- `startingPlayer` (constructor param, default `0`) records who opened the end — read back via
+  `end.startingPlayer` when the next end starts, so the winner of an end can be handed the next one
+  (or, for a void/replayed end, the same player can restart it). `currentPlayer` still starts there and
+  moves independently as deliveries happen.
 
 `Bowl.owner` (added alongside this) records which player delivered a given bowl — this is how "which
 bowls are still in play" per player is tracked; it's set from `end.currentPlayer` at construction time
@@ -195,6 +238,57 @@ in `releaseBowl()`, before `recordDelivery()` advances the turn.
 
 See `core/src/test/kotlin/io/github/lawn_bowls/game/EndTest.kt` for behavioral tests of the turn order,
 remaining-bowl counts, completion, and delivery gating.
+
+## Scoring
+
+`io.github.lawn_bowls.game.Scoring` and `io.github.lawn_bowls.game.Match` (both in `core`, Kotlin) turn
+a settled end into a shot count and accumulate that across a full match; `Main` drives the lifecycle
+between them and renders the result as an on-screen scoreboard.
+
+- **`Scoring.scoreEnd(bowls, jack)`** (a stateless `object`, `@JvmStatic` so `Main` can call it directly
+  as `Scoring.scoreEnd(...)`) returns an `EndResult(winner, shots, isVoid)`. If the jack itself is dead
+  (`!jack.isAlive` — knocked out of bounds per `AussieRulesEngine.checkHorizontalBounds`), the whole end
+  is void and must be replayed rather than scored. Otherwise it filters to `bowl.isAlive` bowls only
+  (this alone already gets touchers-in-the-ditch right and dead/out-of-bounds bowls wrong — no
+  ditch-specific logic needed here, it's all encoded in `isAlive` upstream by the rules engine), sorts
+  by distance to the jack (`Vector2.dst`), and counts consecutive bowls from the closest player's `owner`
+  until the count is interrupted by the other player's nearest bowl — that count is `shots`.
+- **`Match(maxEnds = 7)`** accumulates `scores` (an `IntArray(2)`) and `endsPlayed` via `recordEnd(result)`;
+  a void result changes neither (so a replayed end doesn't count against the cap). `isComplete` is true
+  once `endsPlayed >= maxEnds` *and* the scores actually differ — a tie at the cap keeps `isComplete`
+  false, so the match keeps going end-by-end (still through ordinary `recordEnd` calls) until a
+  tie-break end finally breaks it. `winner` is the higher-scoring player once `isComplete`, else `null`.
+
+`Main` owns one `Match` alongside its `End`, and drives the handoff between ends in
+`updateEndLifecycle(delta)` (called every frame, right after `updatePhysics`):
+
+1. Once `end.isComplete() && end.allSettled(bowls)` and the just-finished end hasn't been scored yet,
+   call `Scoring.scoreEnd`, feed the result to `match.recordEnd`, and start a short on-screen pause
+   (`END_TRANSITION_DELAY_S`, 2.5s) showing a one-line result message (`describeResult`) so the final
+   head is visible before anything resets.
+2. Once that pause elapses, `startNextEnd(result)` clears `bowls`/`bowlInstances`, respots the jack at
+   its original start position, and creates a new `End` — handed to `result.winner` (the real bowls
+   convention: the end's winner bowls first next end), or to the *same* starter as before if the end was
+   void (dead-jack replay) or scoreless. Rink-direction reversal between ends (a real detail) is
+   deliberately not modeled — every end plays from the same mat position.
+3. Once `match.isComplete()`, this whole cycle stops — the final green and scoreboard are left on
+   screen, and `Main.canDeliver()` (which `touchDown`/`releaseBowl` both check instead of calling
+   `end.canDeliver` directly) starts returning `false` so no further deliveries are accepted.
+
+**Scoreboard rendering**: `drawScoreboardPanels()` (a `ShapeRenderer` filled-rect pass, screen-space —
+projection matrix borrowed from `batch.getProjectionMatrix()` rather than the 3D camera used for
+`drawAimArrow`) draws two adjacent boxes colored `player0Color`/`player1Color`; `drawScoreboardText()`
+(called from the same `batch.begin()/end()` block as `drawHud`) overlays each player's score (a second,
+larger-scaled `BitmapFont`, `scoreFont`), a "v" divider, an ends counter (`"End n / 7"`, or
+`"Tie-break end n"` past the cap), and the transient result message from step 1 above, or the final
+`"Player N wins X–Y"` line once the match is complete. The two-panels-plus-"v" layout is styled after a
+real portable lawn-bowls A-frame scoreboard (`assets/score_board.avif`, kept as a design reference, not
+loaded as a texture) but recolored to the game's own `player0Color`/`player1Color` (maroon/navy) instead
+of that photo's colors, and without reproducing its printed branding.
+
+See `core/src/test/kotlin/io/github/lawn_bowls/game/ScoringTest.kt` and `MatchTest.kt` for behavioral
+tests of shot-counting (including the toucher-in-ditch and dead-bowl-excluded cases) and match
+accumulation/tie-break behavior.
 
 ## Physics
 
